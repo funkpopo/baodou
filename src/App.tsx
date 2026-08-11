@@ -25,6 +25,7 @@ function App() {
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [busy, setBusy] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [conversationCollapsed, setConversationCollapsed] = useState(false);
   const [activePage, setActivePage] = useState<"session" | "history" | "logs" | "settings">("session");
   const [error, setError] = useState("");
   const [modelPath, setModelPath] = useState("");
@@ -52,8 +53,11 @@ function App() {
         }
         return [...current.slice(-7), event];
       });
-      setRuntime((current) => ({ ...current, phase: event.phase, message: event.detail }));
-      if (event.complete || event.phase === "error") { setBusy(false); taskSubmissionLock.current = false; }
+      setRuntime((current) => ({ ...current, phase: event.phase, message: event.detail, taskId: event.taskId || current.taskId }));
+      // The event is the source of truth for the task lifecycle. In particular,
+      // completed/stopped are terminal states even when the command response
+      // arrives before the event listener has flushed its React update.
+      if (event.complete || ["completed", "stopped", "error"].includes(event.phase)) { setBusy(false); taskSubmissionLock.current = false; }
     }).then((unlisten) => { if (cancelled) unlisten(); else cleanup = unlisten; });
     return () => { cancelled = true; window.clearInterval(runtimeTimer); cleanup?.(); };
   }, []);
@@ -119,7 +123,7 @@ function App() {
       <header className="topbar" data-tauri-drag-region onMouseDown={dragWindow}>
         <div className="brand"><div className="brand-mark"><Sparkles size={16} /></div><span>baodou</span><small>DESKTOP</small></div>
         <div className="topbar-center"><span className="traffic-dot" /> {runtime.mode}<span className="slash">/</span><span className="muted">本地运行</span></div>
-        <div className="window-tools"><button className="icon-button" title="停止当前任务" onClick={() => action(bridge.stop)}><CircleStop size={16} /></button><button className="window-button" title="最小化" onClick={minimizeWindow}><Minimize2 size={15} /></button><button className="window-button" title="最大化 / 还原" onClick={toggleMaximizeWindow}><Maximize2 size={15} /></button><button className="window-button close-button" title="关闭" onClick={closeWindow}><X size={15} /></button></div>
+        <div className="window-tools"><button className="window-button" title="最小化" onClick={minimizeWindow}><Minimize2 size={15} /></button><button className="window-button" title="最大化 / 还原" onClick={toggleMaximizeWindow}><Maximize2 size={15} /></button><button className="window-button close-button" title="关闭" onClick={closeWindow}><X size={15} /></button></div>
       </header>
 
       <div className="workspace">
@@ -135,13 +139,14 @@ function App() {
           {activePage === "logs" && <SimplePage icon={<FileText size={22} />} title="运行日志" detail="运行日志会在模型启动和任务执行后显示。" />}
           <div className="content-scroll">
             <div className="eyebrow"><span className={`status-pip ${busy ? "live" : ""}`} /> SESSION / {runtime.phase.toUpperCase()}</div>
-            <div className="intro"><h1>让电脑替你完成<br /><span>下一步。</span></h1><p>描述一个目标，baodou 会观察屏幕、整理计划，并在每次操作前交还控制权。</p></div>
-            <div className="task-composer">
+            <div className={`intro ${events.length ? "has-session" : ""}`}><h1>{events.length ? "任务正在被处理" : <>让电脑替你完成<br /><span>下一步。</span></>}</h1><p>{events.length ? (runtime.goal || "当前任务") : "描述一个目标，baodou 会观察屏幕、整理计划，并在每次操作前交还控制权。"}</p></div>
+            {events.length === 0 && <div className="task-composer">
               <div className="composer-top"><span className="composer-label"><Sparkles size={15} /> 任务指令</span><span className="composer-hint">Enter 发送 · Shift Enter 换行</span></div>
               <textarea value={goal} onChange={(e) => setGoal(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); startTask(); } }} placeholder="例如：打开浏览器，搜索今天的天气" rows={3} />
               <div className="composer-footer"><div className="suggestions">{suggestions.map((item) => <button key={item} onClick={() => setGoal(item)}>{item}</button>)}</div><button className="send-button" onClick={startTask} disabled={!goal.trim() || busy}><Send size={16} /> {busy ? "运行中" : "开始"}</button></div>
-            </div>
-              <div className="mode-row"><button className={`mode-toggle ${live ? "selected" : ""}`} onClick={() => setLive(!live)}><span className="toggle"><i /></span><span><strong>{live ? "本地模型模式" : "原生预览模式"}</strong><small>{live ? "Rust 直连 llama-server；仍需逐步确认" : "Rust 截图与规则规划；不会注入键鼠事件"}</small></span></button><div className="safe-badge"><ShieldCheck size={15} /> 高风险操作自动拦截</div></div>
+            </div>}
+            <BotStage phase={runtime.phase} busy={busy} result={latest?.phase === "completed" ? modelResult(events) : undefined} />
+            {events.length === 0 && <div className="mode-row"><button className={`mode-toggle ${live ? "selected" : ""}`} onClick={() => setLive(!live)}><span className="toggle"><i /></span><span><strong>{live ? "本地模型模式" : "原生预览模式"}</strong><small>{live ? "Rust 直连 llama-server；仍需逐步确认" : "Rust 截图与规则规划；不会注入键鼠事件"}</small></span></button><div className="safe-badge"><ShieldCheck size={15} /> 高风险操作自动拦截</div></div>}
 
             <div className="section-heading"><div><span className="section-kicker">LIVE SESSION</span><h2>工作流</h2></div><span className={`phase-badge ${runtime.phase}`}>{phaseLabel}</span></div>
             <div className="timeline">{events.length === 0 ? <div className="empty-state"><ScanSearch size={21} /><span>输入目标后，这里会显示观察、计划、确认与验证过程。</span></div> : events.map((event, index) => <div className={`timeline-item ${index === events.length - 1 ? "current" : ""}`} key={`${event.taskId}-${index}`}><div className="timeline-line"><span className="timeline-icon">{event.phase === "awaiting_user" ? <TriangleAlert size={14} /> : event.phase === "completed" ? <Check size={14} /> : <Activity size={14} />}</span>{index < events.length - 1 && <i />}</div><div className="timeline-content"><div className="timeline-title"><strong>{event.title}</strong><time><Timer size={12} />刚刚</time></div><p>{event.detail}</p>{event.phase === "awaiting_user" && <div className="approval-inline"><button className="approve" onClick={() => action(bridge.confirm)}><Check size={14} /> 确认这一步</button><button className="reject" onClick={() => action(bridge.pause)}><X size={14} /> 暂停</button></div>}</div></div>)}</div>
@@ -149,7 +154,7 @@ function App() {
           <footer className="main-footer"><span><Keyboard size={14} /> 全局停止 <kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>Esc</kbd></span><span className="footer-right"><span className="connection"><i /> Rust host connected</span></span></footer>
         </section>
 
-        <aside className={`workflow-sidebar ${activePage !== "session" ? "hidden" : ""}`}><WorkflowPanel events={events} onAction={action} /></aside>
+        <aside className={`workflow-sidebar ${activePage !== "session" ? "hidden" : ""} ${conversationCollapsed ? "collapsed" : ""}`}><WorkflowPanel events={events} onAction={action} collapsed={conversationCollapsed} onToggle={() => setConversationCollapsed(!conversationCollapsed)} /></aside>
 
         <aside className={`inspector ${showDiagnostics ? "open" : ""}`}><div className="inspector-title"><div><span className="section-kicker">RUNTIME</span><h3>运行状态</h3></div><button className="icon-button" onClick={() => setShowDiagnostics(false)}><X size={16} /></button></div><div className="screen-preview"><div className="preview-grid" /><div className="preview-window"><div /><div /><div /></div><span className="preview-label"><Eye size={12} /> 屏幕预览将在观察时出现</span></div><div className="inspector-section"><label>当前目标</label><p className="target-text">{runtime.goal || "尚未开始任务"}</p></div><div className="metric-list"><Metric icon={<Monitor size={15} />} name="屏幕采集" value={runtime.phase === "observing" ? "ACTIVE" : "READY"} /><Metric icon={<Cpu size={15} />} name="推理后端" value={runtime.inferenceBackend} /><Metric icon={<ScanSearch size={15} />} name="计划器" value="Rust planner" /><Metric icon={<Timer size={15} />} name="协议版本" value={runtime.protocolVersion} /></div><div className="model-settings"><label>llama-server.exe 路径</label><input value={modelPathDraft} onChange={(event) => setModelPathDraft(event.target.value)} /><label>模型 GGUF 路径</label><input value={modelFilePathDraft} onChange={(event) => setModelFilePathDraft(event.target.value)} /><label>MMPROJ 路径</label><input value={mmprojPathDraft} onChange={(event) => setMmprojPathDraft(event.target.value)} /><label>LLAMA URL</label><input value={llamaUrlDraft} onChange={(event) => setLlamaUrlDraft(event.target.value)} /><button onClick={saveModelPath}>保存模型配置</button>{modelConfigMessage && <small>{modelConfigMessage}</small>}</div><div className="inspector-note"><ShieldCheck size={17} /><div><strong>本地模型配置</strong><p>路径和 URL 保存在应用数据目录，重启应用后自动使用。</p></div></div>{error && <div className="error-box"><AlertTriangle size={15} /> {error}</div>}{canConfirm && <button className="confirm-large" onClick={() => action(bridge.confirm)}><Check size={16} /> 确认并继续</button>}{busy && <button className="pause-large" onClick={() => action(bridge.pause)}><Pause size={15} /> 暂停当前任务</button>}</aside>
       </div>
@@ -168,8 +173,57 @@ function formatWorkflowDetail(detail: string) {
   }
 }
 
-function WorkflowPanel({ events, onAction }: { events: TaskEvent[]; onAction: (fn: () => Promise<RuntimeSnapshot>) => void }) {
-  return <div className="workflow-panel"><div className="workflow-panel-heading"><div><span className="section-kicker">LIVE SESSION</span><h2>工作流</h2></div><span className="phase-badge">{events.at(-1)?.phase === "completed" ? "已完成" : events.length ? "进行中" : "待命"}</span></div><div className="workflow-panel-list">{events.length === 0 ? <div className="empty-state"><ScanSearch size={21} /><span>输入目标后，这里会显示实时工作流。</span></div> : events.map((event, index) => <div className={`workflow-panel-item ${index === events.length - 1 ? "current" : ""}`} key={`${event.taskId}-${event.phase}-${event.title}-${index}`}><div className="workflow-panel-line"><span className="timeline-icon">{event.phase === "awaiting_user" ? <TriangleAlert size={14} /> : event.phase === "completed" ? <Check size={14} /> : <Activity size={14} />}</span>{index < events.length - 1 && <i />}</div><div className="workflow-panel-content"><div className="timeline-title"><strong>{event.title}</strong><time>刚刚</time></div><p>{formatWorkflowDetail(event.detail)}</p>{event.phase === "awaiting_user" && event.requiresConfirmation && <div className="approval-inline"><button className="approve" onClick={() => onAction(bridge.confirm)}><Check size={14} /> 确认这一步</button><button className="reject" onClick={() => onAction(bridge.pause)}><X size={14} /> 暂停</button></div>}</div></div>)}</div></div>;
+function llmResult(detail: string) {
+  const marker = "模型结果：";
+  const candidates = [detail.replace(/^只读观察已完成：/, ""), detail.startsWith(marker) ? detail.slice(marker.length) : "", detail];
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate.replace(/^```json\s*|\s*```$/g, ""));
+      if (typeof parsed.observation === "string") {
+        const steps = Array.isArray(parsed.steps) ? parsed.steps.map((step: Record<string, unknown>, index: number) => {
+          const action = typeof step.action === "string" ? step.action : "";
+          const target = typeof step.target === "string" ? step.target : "";
+          const expected = typeof step.expected_change === "string" ? step.expected_change : "";
+          return `${index + 1}. ${[action, target].filter(Boolean).join(" · ")}${expected ? `\n   预期结果：${expected}` : ""}`;
+        }).join("\n") : "";
+        return [parsed.observation, steps ? `模型计划：\n${steps}` : ""].filter(Boolean).join("\n\n");
+      }
+    } catch { /* The runtime may still be streaming an incomplete JSON object. */ }
+  }
+  return candidates.find((candidate) => candidate && !candidate.trim().startsWith("{")) || "正在生成模型结果…";
+}
+
+function modelOutputEvent(events: TaskEvent[]) {
+  return [...events].reverse().find((event) => event.phase === "planning" && event.title === "模型输出中")
+    || events.find((event) => event.phase === "completed");
+}
+
+function modelResult(events: TaskEvent[]) {
+  const source = modelOutputEvent(events);
+  return source ? llmResult(source.detail) : "";
+}
+
+function WorkflowPanel({ events, onAction, collapsed, onToggle }: { events: TaskEvent[]; onAction: (fn: () => Promise<RuntimeSnapshot>) => void; collapsed: boolean; onToggle: () => void }) {
+  const latest = events.at(-1);
+  const streamed = [...events].reverse().find((event) => event.phase === "planning" && event.title === "模型输出中");
+  // Keep the model's streamed response when the runtime later emits its
+  // terminal event; the terminal event is only lifecycle metadata.
+  const source = streamed || (latest?.phase === "completed" ? latest : undefined);
+  const outputEvent = source ? { ...source, phase: latest?.phase === "completed" ? "completed" as const : source.phase, title: latest?.phase === "completed" ? "输出完毕" : "输出中", detail: modelResult(events), requiresConfirmation: latest?.phase === "awaiting_user" && latest.requiresConfirmation } : undefined;
+  const canStop = !!outputEvent && !!latest && ["observing", "planning", "awaiting_user", "executing"].includes(latest.phase);
+  const flow = [
+    { phase: "observing", label: "观察桌面" },
+    { phase: "planning", label: "生成模型结果" },
+    { phase: "awaiting_user", label: "等待确认" },
+    { phase: "completed", label: "输出完毕" },
+  ];
+  const reached = (phase: string) => events.some((event) => event.phase === phase) || (phase === "planning" && !!streamed) || (phase === "completed" && latest?.phase === "completed");
+  return <div className="workflow-panel"><div className="workflow-panel-heading"><div className="conversation-heading"><span className="section-kicker">AGENT SESSION</span><h2>任务对话</h2></div><div className="conversation-tools"><span className={`phase-badge ${latest?.phase || ""}`}>{latest?.phase === "completed" ? "输出完毕" : events.length ? "输出中" : "待命"}</span><button className="collapse-button" onClick={onToggle} title={collapsed ? "展开对话" : "收起对话"}>{collapsed ? "→" : "←"}</button></div></div><div className="workflow-flow">{flow.map((item) => <span className={`${reached(item.phase) ? "reached" : ""} ${latest?.phase === item.phase ? "active" : ""}`} key={item.phase}><i />{item.label}</span>)}</div><div className="workflow-panel-list">{!outputEvent ? <div className="empty-state"><ScanSearch size={21} /><span>输入任务指令后，Agent 会在这里回复。</span></div> : <div className={`workflow-panel-item message-${outputEvent.phase} current`}><div className="workflow-panel-line"><span className="timeline-icon">{outputEvent.phase === "completed" ? <Check size={14} /> : <Activity size={14} />}</span></div><div className="workflow-panel-content"><div className="timeline-title"><strong>{outputEvent.title}</strong><time>刚刚</time></div><p>{outputEvent.detail}</p>{latest?.phase === "awaiting_user" && latest.requiresConfirmation && <div className="approval-inline"><button className="approve" onClick={() => onAction(bridge.confirm)}><Check size={14} /> 确认执行</button><button className="reject" onClick={() => onAction(bridge.pause)}><X size={14} /> 暂停</button></div>}{canStop && <button className="stop-inline" onClick={() => onAction(bridge.stop)}><CircleStop size={13} /> 中止任务</button>}</div></div>}</div></div>;
+}
+
+function BotStage({ phase, busy, result }: { phase: string; busy: boolean; result?: string }) {
+  const terminal = phase === "completed" || phase === "stopped" || phase === "error";
+  return <div className={`bot-stage ${busy && !terminal ? "is-active" : ""} ${terminal ? "is-terminal" : ""}`}><div className="bot-orbit orbit-one" /><div className="bot-orbit orbit-two" /><div className="bubble-bot"><span className="bot-eye eye-left" /><span className="bot-eye eye-right" /><span className="bot-mouth" /></div><div className="bot-caption"><strong>{phase === "completed" ? "任务完成" : phase === "stopped" ? "任务已中止" : phase === "error" ? "需要处理" : busy ? "baodou 正在工作" : "准备就绪"}</strong><span>{busy ? "正在观察、规划并执行当前指令" : "输入任务后，Agent 会在这里回复"}</span></div>{result && <div className="bot-result"><span className="result-mark"><Check size={13} /></span><div><small>执行结果</small><p>{result}</p></div></div>}</div>;
 }
 
 function SettingsPage(props: {

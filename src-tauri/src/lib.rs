@@ -720,7 +720,7 @@ fn fallback_plan(goal: &str, model_error: Option<String>) -> NativePlan {
         requires_confirmation: false,
     };
     NativePlan {
-        observation: format!("{detail}。已记录任务“{goal}”，等待你确认下一步。"),
+        observation: format!("{detail}。已记录任务“{goal}”，本步骤为只读观察，不会注入输入。"),
         blocked_reason: None,
         step,
     }
@@ -728,7 +728,7 @@ fn fallback_plan(goal: &str, model_error: Option<String>) -> NativePlan {
 
 fn execute_safe_action(plan: &NativePlan, live: bool) -> Result<String, String> {
     if plan.step.requires_confirmation == false {
-        return Ok(format!("模型结果：{}；模型判断无需授权，已完成该步骤", plan.observation));
+        return Ok(format!("只读观察已完成：{}", plan.observation));
     }
     if !live {
         return Ok("预览模式已确认计划；dry-run 未向系统注入输入".into());
