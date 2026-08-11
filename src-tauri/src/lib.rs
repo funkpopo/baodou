@@ -5,6 +5,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     env,
     io::{BufRead, BufReader, Cursor},
     process::{Child, Command, Stdio},
@@ -610,21 +611,32 @@ fn run_native_task(app: AppHandle, task_id: String, goal: String) {
         ) {
             Ok(plan) => plan,
             Err(error) => {
-                if step_index == 1 && error.contains("下一步动作") {
+                let should_resolve_intent = (step_index == 1 && error.contains("下一步动作"))
+                    || error.contains("重复激活当前前台窗口");
+                if should_resolve_intent {
                     match infer_window_intent(&goal, &visible_windows, &endpoint) {
                         Ok(Some(plan)) => plan,
                         Ok(None) => {
-                            finish_with_error(&app, &task_id, "模型规划失败", error);
-                            return;
+                            if let Some(plan) = launch_plan_from_goal(&goal, "模型未返回窗口意图")
+                            {
+                                plan
+                            } else {
+                                finish_with_error(&app, &task_id, "模型规划失败", error);
+                                return;
+                            }
                         }
                         Err(intent_error) => {
-                            finish_with_error(
-                                &app,
-                                &task_id,
-                                "窗口意图判断失败",
-                                format!("{error}；{intent_error}"),
-                            );
-                            return;
+                            if let Some(plan) = launch_plan_from_goal(&goal, &intent_error) {
+                                plan
+                            } else {
+                                finish_with_error(
+                                    &app,
+                                    &task_id,
+                                    "窗口意图判断失败",
+                                    format!("{error}；{intent_error}"),
+                                );
+                                return;
+                            }
                         }
                     }
                 } else {
@@ -778,15 +790,43 @@ fn action_label(action: &str) -> &str {
 
 fn is_context_switch_action(action: &str) -> bool {
     let action = action.to_lowercase();
+    is_window_activation_action(&action)
+        || action.contains("open_app")
+        || action.contains("launch")
+        || action.contains("启动应用")
+        || action.contains("打开应用")
+}
+
+fn is_window_activation_action(action: &str) -> bool {
+    let action = action.to_lowercase();
     action.contains("activate")
         || action.contains("focus")
         || action.contains("window")
-        || action.contains("open_app")
-        || action.contains("launch")
         || action.contains("激活")
         || action.contains("窗口")
-        || action.contains("启动应用")
-        || action.contains("打开应用")
+}
+
+fn normalize_window_action(plan: &mut NativePlan, visible_windows: &[String]) {
+    let Some(step) = plan.step.as_mut() else {
+        return;
+    };
+    if !is_window_activation_action(&step.action) || step.target.trim().is_empty() {
+        return;
+    }
+    let requested = step.target.trim().to_lowercase();
+    if let Some(actual_title) = visible_windows.iter().find(|title| {
+        let title = title.to_lowercase();
+        title.contains(&requested) || requested.contains(&title)
+    }) {
+        step.target = actual_title.clone();
+        return;
+    }
+    let query = step.target.trim().to_string();
+    step.action = "open_app".into();
+    step.x = None;
+    step.y = None;
+    step.text = None;
+    step.expected_change = format!("通过 Windows Search 启动“{query}”并出现可见窗口");
 }
 
 fn capture_primary() -> Result<ScreenFrame, String> {
@@ -827,7 +867,7 @@ fn infer_plan(
     frame: &ScreenFrame,
     endpoint: &str,
 ) -> Result<NativePlan, String> {
-    let prompt = "You are a local Windows computer-use agent operating in a repeated observe-act-verify loop. Reply ONLY valid JSON: {\"observation\":string,\"done\":boolean,\"summary\":string,\"step\":{\"action\":string,\"target\":string,\"x\":integer|null,\"y\":integer|null,\"text\":string|null,\"risk\":string,\"expected_change\":string}|null}. Infer the target application from the user's intent and the dynamic visible-window inventory; never rely on a built-in app-name mapping. First verify whether the user's whole goal is visibly complete. Set done=true only when the latest screenshot provides evidence; then provide a concise summary and step=null. When done=false, step MUST be a non-null executable action. Supported actions: activate_window (target MUST copy a distinctive substring from one inventory title), open_app (target is a concise Windows Search query when the intended app has no visible window), click (x/y in the supplied image), input (text), key (text: Enter/Escape/Tab/Backspace/Space/arrows), and wait. Prefer activate_window for an existing target; use open_app only when no listed window matches. Never claim completion merely because a window was activated, an app was launched, or one intermediate action succeeded.";
+    let prompt = "You are a local Windows computer-use agent in an observe-act-verify loop. Return exactly ONE next action, never a sequence or a full future workflow. Do not output JSON. Put every field on its own line in this exact order:\nSTATUS: CONTINUE or DONE\nOBSERVATION: only what the screenshot currently proves\nACTION: activate_window, open_app, click, input, key, wait, or none\nTARGET: window title, app search query, or UI target\nX: integer or blank\nY: integer or blank\nTEXT: input text/key or blank\nEXPECTED: expected visible change after this one action\nSUMMARY: completion summary or blank\nEND_PLAN\nWrite STATUS exactly once and finish at END_PLAN. Do not predict later actions and do not repeat the template. Infer the application from user intent and the live window inventory, never from a built-in mapping. For activate_window, copy a distinctive substring from a real inventory title and never activate the already-current foreground window. Use open_app when no listed window matches. STATUS DONE is valid only when the latest screenshot proves the whole goal is complete; then ACTION must be none. Otherwise STATUS must be CONTINUE and ACTION must be executable. Never mark done merely because a window opened or an intermediate action succeeded.";
     let history_text = if history.is_empty() {
         "No actions executed yet.".to_string()
     } else {
@@ -851,8 +891,9 @@ fn infer_plan(
                 {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{}", frame.png_base64)}}
             ]}
         ],
-        "temperature": 0.2,
-        "max_tokens": 1200,
+        "temperature": 0.0,
+        "max_tokens": 512,
+        "stop": ["END_PLAN"],
         "stream": true
     });
     let client = Client::builder()
@@ -882,64 +923,170 @@ fn infer_plan(
                 .and_then(Value::as_str)
             {
                 content.push_str(delta);
+                let (bounded, terminated) = first_model_plan(&content);
                 emit(
                     app,
                     event(
                         task_id,
                         "planning",
                         "模型输出中",
-                        content.clone(),
+                        bounded.clone(),
                         false,
                         false,
                         true,
                         None,
                     ),
                 );
+                if terminated {
+                    content = bounded;
+                    break;
+                }
             }
         }
     }
     if content.trim().is_empty() {
         return Err("模型流没有返回内容".into());
     }
-    let json_text =
-        extract_model_json(&content).ok_or_else(|| "模型响应中未找到 JSON 对象".to_string())?;
-    let parsed: Value = serde_json::from_str(&json_text)
-        .map_err(|error| format!("模型响应不是有效 JSON：{error}"))?;
-    let observation = parsed
-        .get("observation")
-        .and_then(Value::as_str)
-        .unwrap_or("模型已完成屏幕观察")
-        .to_string();
-    let done = parsed.get("done").and_then(Value::as_bool).unwrap_or(false);
-    let summary = parsed
-        .get("summary")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let step_value = parsed
-        .get("step")
-        .filter(|value| !value.is_null())
-        .cloned()
-        .or_else(|| {
-            parsed
-                .get("steps")
-                .and_then(Value::as_array)
-                .and_then(|steps| steps.first())
-                .cloned()
+    let mut plan = parse_model_plan(&first_model_plan(&content).0)?;
+    normalize_window_action(&mut plan, visible_windows);
+    if let Some(step) = plan.step.as_ref() {
+        let target = step.target.trim().to_lowercase();
+        let foreground = foreground_window.trim().to_lowercase();
+        if is_window_activation_action(&step.action)
+            && !target.is_empty()
+            && !foreground.is_empty()
+            && (foreground.contains(&target) || target.contains(&foreground))
+        {
+            return Err(format!(
+                "模型试图重复激活当前前台窗口“{foreground_window}”，未产生可验证的状态变化"
+            ));
+        }
+    }
+    Ok(plan)
+}
+
+fn parse_model_plan(content: &str) -> Result<NativePlan, String> {
+    let fields = tagged_fields(&first_model_plan(content).0);
+    let status = tagged_value(&fields, &["STATUS", "状态"]).to_uppercase();
+    let action = tagged_value(&fields, &["ACTION", "动作"]);
+    let done = ["DONE", "COMPLETE", "COMPLETED", "完成"]
+        .iter()
+        .any(|value| status.contains(value))
+        || ["done", "complete", "completed", "完成"]
+            .iter()
+            .any(|value| action.eq_ignore_ascii_case(value));
+    let observation = tagged_value(&fields, &["OBSERVATION", "观察"]);
+    let summary = tagged_value(&fields, &["SUMMARY", "总结", "结果"]);
+
+    if done {
+        return Ok(NativePlan {
+            observation: if observation.is_empty() {
+                "模型确认目标已经完成".into()
+            } else {
+                observation
+            },
+            summary,
+            done: true,
+            step: None,
         });
-    let step = step_value
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|e| format!("模型步骤格式错误：{e}"))?;
-    if !done && step.is_none() {
+    }
+    if action.is_empty() || action.eq_ignore_ascii_case("none") || action == "无" {
         return Err("模型既未确认任务完成，也没有返回下一步动作".into());
     }
+    let target = tagged_value(&fields, &["TARGET", "目标"]);
+    let text = tagged_value(&fields, &["TEXT", "文本", "按键"]);
+    let expected_change = tagged_value(&fields, &["EXPECTED", "预期"]);
+    let x = tagged_value(&fields, &["X"]);
+    let y = tagged_value(&fields, &["Y"]);
     Ok(NativePlan {
-        observation,
+        observation: if observation.is_empty() {
+            "模型已选择下一步动作".into()
+        } else {
+            observation
+        },
         summary,
-        done,
-        step,
+        done: false,
+        step: Some(PlanStep {
+            action,
+            target,
+            x: x.parse().ok(),
+            y: y.parse().ok(),
+            text: (!text.is_empty()).then_some(text),
+            risk: String::new(),
+            expected_change,
+            requires_confirmation: false,
+        }),
     })
+}
+
+fn tagged_fields(content: &str) -> HashMap<String, String> {
+    let tail = content
+        .rsplit_once("</think>")
+        .map(|(_, tail)| tail)
+        .unwrap_or(content);
+    let normalized = tail.replace(['；', ';'], "\n");
+    normalized
+        .lines()
+        .filter_map(|line| {
+            let line = line
+                .trim()
+                .trim_matches('`')
+                .trim_start_matches(['-', '*', ' ']);
+            let pair = line.split_once(':').or_else(|| line.split_once('：'))?;
+            let key = pair.0.trim().to_uppercase();
+            (!key.is_empty()).then(|| (key, pair.1.trim().to_string()))
+        })
+        .fold(HashMap::new(), |mut fields, (key, value)| {
+            fields.entry(key).or_insert(value);
+            fields
+        })
+}
+
+/// Keep one model turn to one action even when a small model starts repeating
+/// the protocol template. The server normally stops before emitting END_PLAN;
+/// the repeated STATUS boundary is the local fallback for non-compliant models.
+fn first_model_plan(content: &str) -> (String, bool) {
+    let tail_start = content
+        .rfind("</think>")
+        .map(|index| index + "</think>".len())
+        .unwrap_or(0);
+    let tail = &content[tail_start..];
+    let marker_boundary = tail.find("END_PLAN").map(|index| tail_start + index);
+    let mut statuses = Vec::new();
+    for tag in ["STATUS:", "STATUS：", "状态:", "状态："] {
+        for (index, _) in tail.match_indices(tag) {
+            let prefix = &tail[..index];
+            let at_field_start = prefix
+                .trim_end_matches(char::is_whitespace)
+                .chars()
+                .next_back()
+                .map(|ch| matches!(ch, '\n' | '\r' | ';' | '；'))
+                .unwrap_or(true);
+            if at_field_start {
+                statuses.push(tail_start + index);
+            }
+        }
+    }
+    statuses.sort_unstable();
+    statuses.dedup();
+    let repeated_boundary = statuses.get(1).copied();
+    let boundary = match (marker_boundary, repeated_boundary) {
+        (Some(marker), Some(repeated)) => Some(marker.min(repeated)),
+        (Some(marker), None) => Some(marker),
+        (None, Some(repeated)) => Some(repeated),
+        (None, None) => None,
+    };
+    match boundary {
+        Some(index) => (content[..index].trim().to_string(), true),
+        None => (content.trim().to_string(), false),
+    }
+}
+
+fn tagged_value(fields: &HashMap<String, String>, keys: &[&str]) -> String {
+    keys.iter()
+        .find_map(|key| fields.get(&key.to_uppercase()))
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn infer_window_intent(
@@ -959,7 +1106,7 @@ fn infer_window_intent(
     };
     let payload = json!({
         "messages": [
-            {"role": "system", "content": "Resolve Windows application intent without a built-in alias list. Prefer a visible window that matches the user's task. If none matches but the user clearly names an app, provide a concise Windows Search query. Reply ONLY JSON: {\"target_window\":string|null,\"launch_query\":string|null,\"reason\":string}. target_window must copy a distinctive substring from exactly one supplied title. Never invent a window title."},
+            {"role": "system", "content": "Resolve Windows application intent without a built-in alias list. Do not output JSON. Reply with exactly three tagged lines: DECISION: WINDOW, LAUNCH, or NONE; TARGET: a real visible window-title substring for WINDOW, a concise Windows Search query for LAUNCH, or blank; REASON: one short reason. Prefer a matching visible window and never invent a window title."},
             {"role": "user", "content": format!("User goal: {goal}\nVisible windows:\n{inventory}")}
         ],
         "temperature": 0.0,
@@ -978,46 +1125,166 @@ fn infer_window_intent(
         .map_err(|error| format!("窗口意图模型返回错误：{error}"))?
         .json()
         .map_err(|error| format!("窗口意图响应解析失败：{error}"))?;
-    let content = response
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .ok_or("窗口意图响应没有内容")?;
-    let json_text = extract_model_json(content).ok_or("窗口意图响应中没有 JSON")?;
-    let parsed: Value =
-        serde_json::from_str(&json_text).map_err(|error| format!("窗口意图 JSON 无效：{error}"))?;
-    let reason = parsed
-        .get("reason")
-        .and_then(Value::as_str)
-        .unwrap_or("根据用户目标选择最匹配的可见窗口");
-    if let Some(requested) = parsed.get("target_window").and_then(Value::as_str) {
-        let requested = requested.trim().to_lowercase();
-        if !requested.is_empty() {
-            let Some(actual_title) = visible_windows.iter().find(|title| {
-                let title = title.to_lowercase();
-                title.contains(&requested) || requested.contains(&title)
-            }) else {
-                return Err(format!("模型选择了清单外的窗口：{requested}"));
-            };
-            return Ok(Some(intent_plan(
-                reason,
-                "activate_window",
-                actual_title,
-                format!("窗口“{actual_title}”成为当前活动窗口"),
-            )));
+    let content = match response.pointer("/choices/0/message/content") {
+        Some(Value::String(content)) if !content.trim().is_empty() => content.clone(),
+        Some(content) if !content.is_null() => content.to_string(),
+        _ => response
+            .pointer("/choices/0/message/reasoning_content")
+            .or_else(|| response.pointer("/choices/0/text"))
+            .and_then(Value::as_str)
+            .filter(|content| !content.trim().is_empty())
+            .map(str::to_string)
+            .ok_or("窗口意图响应没有内容")?,
+    };
+    let fields = tagged_fields(&content);
+    let decision = tagged_value(&fields, &["DECISION", "决定", "类型"]);
+    let target = tagged_value(&fields, &["TARGET", "目标", "窗口", "应用"]);
+    let reason = tagged_value(&fields, &["REASON", "原因"]);
+    if !decision.is_empty() {
+        return resolve_window_intent_fields(&decision, &target, &reason, visible_windows);
+    }
+    resolve_plain_window_intent(&content, visible_windows)
+}
+
+fn resolve_window_intent_fields(
+    decision: &str,
+    target: &str,
+    reason: &str,
+    visible_windows: &[String],
+) -> Result<Option<NativePlan>, String> {
+    let decision = decision.trim().to_uppercase();
+    let target = target.trim();
+    let reason = if reason.trim().is_empty() {
+        "根据用户目标判断目标应用"
+    } else {
+        reason.trim()
+    };
+    if decision.contains("NONE") || decision.contains("无") {
+        return Ok(None);
+    }
+    if decision.contains("WINDOW") || decision.contains("窗口") {
+        let requested = target.to_lowercase();
+        let Some(actual_title) = visible_windows.iter().find(|title| {
+            let title = title.to_lowercase();
+            title.contains(&requested) || requested.contains(&title)
+        }) else {
+            return Err(format!("模型选择了清单外的窗口：{target}"));
+        };
+        return Ok(Some(intent_plan(
+            reason,
+            "activate_window",
+            actual_title,
+            format!("窗口“{actual_title}”成为当前活动窗口"),
+        )));
+    }
+    if decision.contains("LAUNCH") || decision.contains("启动") || decision.contains("打开") {
+        if target.is_empty() || target.chars().count() > 120 {
+            return Err("模型没有返回有效的应用启动查询".into());
+        }
+        return Ok(Some(intent_plan(
+            reason,
+            "open_app",
+            target,
+            format!("启动应用“{target}”并出现可见窗口"),
+        )));
+    }
+    resolve_plain_window_intent(target, visible_windows)
+}
+
+fn resolve_plain_window_intent(
+    content: &str,
+    visible_windows: &[String],
+) -> Result<Option<NativePlan>, String> {
+    let tail = content
+        .rsplit_once("</think>")
+        .map(|(_, tail)| tail)
+        .unwrap_or(content)
+        .trim();
+    let candidate = tail
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .trim_matches(|ch| matches!(ch, '`' | '"' | '\'' | '“' | '”'));
+    let candidate = ["target:", "app:", "窗口：", "应用："]
+        .iter()
+        .find_map(|prefix| candidate.strip_prefix(prefix))
+        .unwrap_or(candidate)
+        .trim();
+    if candidate.is_empty() || candidate.chars().count() > 80 {
+        return Err("窗口意图响应中没有可用标签或简短目标".into());
+    }
+    if let Some(actual_title) = visible_windows.iter().find(|title| {
+        let title = title.to_lowercase();
+        let candidate = candidate.to_lowercase();
+        title.contains(&candidate) || candidate.contains(&title)
+    }) {
+        return Ok(Some(intent_plan(
+            "从模型纯文本响应中识别到当前可见窗口",
+            "activate_window",
+            actual_title,
+            format!("窗口“{actual_title}”成为当前活动窗口"),
+        )));
+    }
+    if candidate.contains(['。', '！', '？', '!', '?', ';', '；']) {
+        return Err("窗口意图响应不是结构化结果，也不是简短应用名称".into());
+    }
+    Ok(Some(intent_plan(
+        "模型返回了简短应用意图，使用 Windows Search 启动",
+        "open_app",
+        candidate,
+        format!("启动应用“{candidate}”并出现可见窗口"),
+    )))
+}
+
+fn launch_plan_from_goal(goal: &str, reason: &str) -> Option<NativePlan> {
+    let query = extract_launch_query(goal)?;
+    Some(intent_plan(
+        &format!("窗口意图模型格式无效（{reason}），从用户指令中提取目标应用。"),
+        "open_app",
+        &query,
+        format!("启动应用“{query}”并出现可见窗口"),
+    ))
+}
+
+fn extract_launch_query(goal: &str) -> Option<String> {
+    let goal = goal.trim();
+    let prefixes = [
+        "打开",
+        "启动",
+        "运行",
+        "切换到",
+        "切换至",
+        "使用",
+        "用",
+        "在",
+    ];
+    for prefix in prefixes {
+        let Some(start) = goal.find(prefix) else {
+            continue;
+        };
+        let rest = goal[start + prefix.len()..].trim_start_matches([' ', '@', '“', '"']);
+        let terminators: &[&str] = if prefix == "在" {
+            &["中", "里", "内"]
+        } else {
+            &[
+                "并", "然后", "，", ",", "。", "搜索", "查找", "查看", "中", "里",
+            ]
+        };
+        let end = terminators
+            .iter()
+            .filter_map(|marker| rest.find(marker))
+            .min()
+            .unwrap_or(rest.len());
+        let query = rest[..end]
+            .trim()
+            .trim_matches([' ', '@', '“', '”', '"', '\'', ':', '：']);
+        if !query.is_empty() && query.chars().count() <= 60 {
+            return Some(query.into());
         }
     }
-    if let Some(query) = parsed.get("launch_query").and_then(Value::as_str) {
-        let query = query.trim();
-        if !query.is_empty() && query.chars().count() <= 120 {
-            return Ok(Some(intent_plan(
-                reason,
-                "open_app",
-                query,
-                format!("启动应用“{query}”并出现可见窗口"),
-            )));
-        }
-    }
-    Ok(None)
+    None
 }
 
 fn intent_plan(reason: &str, action: &str, target: &str, expected_change: String) -> NativePlan {
@@ -1038,61 +1305,6 @@ fn intent_plan(reason: &str, action: &str, target: &str, expected_change: String
     }
 }
 
-/// Pull a JSON object out of model text that may be wrapped in markdown fences
-/// or surrounded by short prose.
-fn extract_model_json(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    let without_fence = if trimmed.starts_with("```") {
-        let after_open = trimmed
-            .trim_start_matches('`')
-            .trim_start()
-            .trim_start_matches("json")
-            .trim_start_matches("JSON")
-            .trim_start();
-        after_open
-            .strip_suffix("```")
-            .map(|s| s.trim())
-            .unwrap_or(after_open)
-            .trim()
-    } else {
-        trimmed
-    };
-    let bytes = without_fence.as_bytes();
-    let start = without_fence.find('{')?;
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escape = false;
-    for (idx, ch) in without_fence[start..].char_indices() {
-        let i = start + idx;
-        if in_string {
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    // Safe: start..i+ch.len_utf8() are char boundaries from char_indices.
-                    let end = i + ch.len_utf8();
-                    if end <= bytes.len() {
-                        return Some(without_fence[start..end].to_string());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 fn execute_plan(plan: &NativePlan, frame: &ScreenFrame) -> Result<String, String> {
     let settings = Settings::default();
     let mut enigo =
@@ -1105,29 +1317,23 @@ fn execute_plan(plan: &NativePlan, frame: &ScreenFrame) -> Result<String, String
         || action.contains("启动应用")
         || action.contains("打开应用")
     {
-        let query = step.target.trim();
-        if query.is_empty() {
-            return Err("启动应用动作缺少搜索词".into());
-        }
-        enigo
-            .key(enigo::Key::Meta, Direction::Click)
-            .map_err(|error| format!("打开 Windows 搜索失败：{error}"))?;
-        std::thread::sleep(Duration::from_millis(350));
-        enigo
-            .text(query)
-            .map_err(|error| format!("输入应用搜索词失败：{error}"))?;
-        std::thread::sleep(Duration::from_millis(450));
-        enigo
-            .key(enigo::Key::Return, Direction::Click)
-            .map_err(|error| format!("启动应用失败：{error}"))?;
-        std::thread::sleep(Duration::from_millis(900));
+        launch_app_with_search(&mut enigo, &step.target)?;
     } else if action.contains("activate")
         || action.contains("focus")
         || action.contains("window")
         || action.contains("激活")
         || action.contains("窗口")
     {
-        activate_window(&step.target)?;
+        if let Err(error) = activate_window(&step.target) {
+            if error.starts_with("没有找到窗口：") {
+                launch_app_with_search(&mut enigo, &step.target)?;
+                return Ok(format!(
+                    "目标窗口不存在，已通过 Windows Search 启动 · {}",
+                    step.target
+                ));
+            }
+            return Err(error);
+        }
     } else if action.contains("click") || action.contains("点击") {
         let model_x = step.x.ok_or("点击动作缺少 x 坐标")?;
         let model_y = step.y.ok_or("点击动作缺少 y 坐标")?;
@@ -1181,6 +1387,26 @@ fn execute_plan(plan: &NativePlan, frame: &ScreenFrame) -> Result<String, String
     }
 
     Ok(format!("{} · {}", action_label(&step.action), step.target))
+}
+
+fn launch_app_with_search(enigo: &mut Enigo, query: &str) -> Result<(), String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err("启动应用动作缺少搜索词".into());
+    }
+    enigo
+        .key(enigo::Key::Meta, Direction::Click)
+        .map_err(|error| format!("打开 Windows 搜索失败：{error}"))?;
+    std::thread::sleep(Duration::from_millis(350));
+    enigo
+        .text(query)
+        .map_err(|error| format!("输入应用搜索词失败：{error}"))?;
+    std::thread::sleep(Duration::from_millis(450));
+    enigo
+        .key(enigo::Key::Return, Direction::Click)
+        .map_err(|error| format!("启动应用失败：{error}"))?;
+    std::thread::sleep(Duration::from_millis(900));
+    Ok(())
 }
 
 struct WindowSearch {
@@ -1279,6 +1505,125 @@ fn now() -> String {
         .map(|d| d.as_secs())
         .unwrap_or_default();
     format!("{secs}Z")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_generic_chinese_launch_intent() {
+        assert_eq!(
+            extract_launch_query("打开浏览器搜索今天的天气").as_deref(),
+            Some("浏览器")
+        );
+        assert_eq!(
+            extract_launch_query("在 VS Code 中提交当前代码").as_deref(),
+            Some("VS Code")
+        );
+        assert_eq!(
+            extract_launch_query("使用 Chrome 查看项目页面").as_deref(),
+            Some("Chrome")
+        );
+    }
+
+    #[test]
+    fn plain_intent_prefers_a_real_visible_window() {
+        let windows = vec!["weather — Browser".to_string(), "baodou".to_string()];
+        let plan = resolve_plain_window_intent("weather — Browser", &windows)
+            .expect("plain intent should parse")
+            .expect("a plan should be produced");
+        let step = plan.step.expect("plan should contain a step");
+        assert_eq!(step.action, "activate_window");
+        assert_eq!(step.target, "weather — Browser");
+    }
+
+    #[test]
+    fn plain_app_name_becomes_dynamic_search_query() {
+        let plan = resolve_plain_window_intent("浏览器", &[])
+            .expect("plain app intent should parse")
+            .expect("a plan should be produced");
+        let step = plan.step.expect("plan should contain a step");
+        assert_eq!(step.action, "open_app");
+        assert_eq!(step.target, "浏览器");
+    }
+
+    #[test]
+    fn parses_tagged_computer_use_action_without_json() {
+        let plan = parse_model_plan(
+            "STATUS: CONTINUE\nOBSERVATION: 浏览器尚未打开\nACTION: open_app\nTARGET: 浏览器\nX:\nY:\nTEXT:\nEXPECTED: 浏览器窗口出现\nSUMMARY:",
+        )
+        .expect("tagged action should parse");
+        assert!(!plan.done);
+        let step = plan.step.expect("action should contain a step");
+        assert_eq!(step.action, "open_app");
+        assert_eq!(step.target, "浏览器");
+    }
+
+    #[test]
+    fn parses_tagged_completion_without_json() {
+        let plan = parse_model_plan(
+            "STATUS: DONE\nOBSERVATION: 天气结果已显示\nACTION: none\nSUMMARY: 已打开浏览器并搜索今天的天气",
+        )
+        .expect("tagged completion should parse");
+        assert!(plan.done);
+        assert!(plan.step.is_none());
+        assert_eq!(plan.summary, "已打开浏览器并搜索今天的天气");
+    }
+
+    #[test]
+    fn repeated_model_protocol_uses_only_the_first_action() {
+        let response = "STATUS: CONTINUE; OBSERVATION: 浏览器尚未打开; ACTION: open_app; TARGET: Microsoft Edge; X:; Y:; TEXT:; EXPECTED: 浏览器打开; SUMMARY:; STATUS: DONE; OBSERVATION: 猜测天气已显示; ACTION: none; SUMMARY: 已完成";
+        let (bounded, terminated) = first_model_plan(response);
+        assert!(terminated);
+        assert_eq!(bounded.matches("STATUS:").count(), 1);
+
+        let plan = parse_model_plan(response).expect("first tagged action should parse");
+        assert!(!plan.done);
+        let step = plan.step.expect("first action should be preserved");
+        assert_eq!(step.action, "open_app");
+        assert_eq!(step.target, "Microsoft Edge");
+    }
+
+    #[test]
+    fn end_plan_marker_terminates_streamed_plan() {
+        let response = "STATUS: DONE\nOBSERVATION: 天气结果已显示\nACTION: none\nSUMMARY: 已完成\nEND_PLAN\nSTATUS: CONTINUE";
+        let (bounded, terminated) = first_model_plan(response);
+        assert!(terminated);
+        assert!(!bounded.contains("END_PLAN"));
+        assert_eq!(bounded.matches("STATUS:").count(), 1);
+    }
+
+    #[test]
+    fn missing_window_activation_becomes_dynamic_app_launch() {
+        let mut plan = intent_plan(
+            "目标浏览器尚未处于前台",
+            "activate_window",
+            "Microsoft Edge",
+            "浏览器窗口成为前台窗口".into(),
+        );
+        normalize_window_action(&mut plan, &["baodou · 电脑操作助手".into()]);
+        let step = plan.step.expect("plan should remain executable");
+        assert_eq!(step.action, "open_app");
+        assert_eq!(step.target, "Microsoft Edge");
+    }
+
+    #[test]
+    fn visible_window_activation_uses_current_inventory_title() {
+        let mut plan = intent_plan(
+            "浏览器已经打开",
+            "activate_window",
+            "Edge",
+            "浏览器窗口成为前台窗口".into(),
+        );
+        normalize_window_action(
+            &mut plan,
+            &["天气 - Microsoft Edge".into(), "baodou".into()],
+        );
+        let step = plan.step.expect("plan should remain executable");
+        assert_eq!(step.action, "activate_window");
+        assert_eq!(step.target, "天气 - Microsoft Edge");
+    }
 }
 
 pub fn run() {

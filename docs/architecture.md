@@ -11,7 +11,7 @@ Rust desktop runtime
     ├─ capture: xcap primary-monitor frames
     ├─ inference: llama.cpp OpenAI-compatible HTTP endpoint
     ├─ intent: dynamic foreground and visible-window resolution
-    ├─ planning: repeated observe-act-verify JSON loop
+    ├─ planning: repeated observe-act-verify tagged-line protocol
     ├─ actions: dynamic app launch, window activation, click, text and keyboard input
     └─ lifecycle: task state, verification, pause and stop
 ```
@@ -44,6 +44,8 @@ Each task runs for at most 12 rounds:
 Click coordinates returned against the resized model image are mapped back to the physical display before input injection. A stop request is checked before every observation and again immediately before every action.
 
 The runtime has no built-in application alias table. If the main planner omits an action, a separate intent-resolution request may select only a title present in the current window inventory. Invented or stale titles are rejected.
+
+Model generation is not constrained to JSON. The model protocol uses short `STATUS`, `OBSERVATION`, `ACTION`, `TARGET`, `TEXT`, and `EXPECTED` lines because small local vision models follow it more reliably.
 
 If no visible window matches but the goal clearly names an application, the intent resolver may return an `open_app` query. The executor opens Windows Search, enters that model-derived query, launches the result, and returns to the observation loop. Before non-window actions, the runtime compares the foreground window with the one captured during planning; a user focus change cancels that action and triggers a fresh observation. `Ctrl+Alt+Esc` is monitored natively as an emergency stop even when baodou is not focused.
 

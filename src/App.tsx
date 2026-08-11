@@ -467,127 +467,59 @@ function App() {
   );
 }
 
-/** Strip markdown fences and common result prefixes from model output. */
+/** Strip presentation wrappers from model output. */
 function normalizeModelDetail(detail: string): string {
   let text = detail.trim();
   for (const prefix of ["模型结果："]) {
     if (text.startsWith(prefix)) text = text.slice(prefix.length).trim();
   }
-  // Full or partial ```json ... ``` fence (streaming may omit the closer).
-  const fenced = text.match(/^```(?:json|JSON)?\s*\r?\n?([\s\S]*?)(?:\r?\n?```\s*)?$/);
+  const fenced = text.match(/^```(?:\w+)?\s*\r?\n?([\s\S]*?)(?:\r?\n?```\s*)?$/);
   if (fenced) text = fenced[1].trim();
-  // Embedded fence somewhere in the string.
-  const embedded = text.match(/```(?:json|JSON)?\s*\r?\n?([\s\S]*?)\r?\n?```/);
+  const embedded = text.match(/```(?:\w+)?\s*\r?\n?([\s\S]*?)\r?\n?```/);
   if (embedded) text = embedded[1].trim();
   return text;
 }
 
-/** Extract the first top-level JSON object, tolerating trailing prose. */
-function extractJsonObject(text: string): string | null {
-  const start = text.indexOf("{");
-  if (start < 0) return null;
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (escape) escape = false;
-      else if (ch === "\\") escape = true;
-      else if (ch === "\"") inString = false;
-      continue;
+function firstTaggedPlan(detail: string): string {
+  const segments = detail.replace(/；/g, ";").split(/([;\r\n])/);
+  let statusCount = 0;
+  let result = "";
+  for (const segment of segments) {
+    const trimmed = segment.trimStart();
+    if (/^(?:STATUS|状态)\s*[:：]/i.test(trimmed)) {
+      statusCount += 1;
+      if (statusCount > 1) break;
     }
-    if (ch === "\"") inString = true;
-    else if (ch === "{") depth += 1;
-    else if (ch === "}") {
-      depth -= 1;
-      if (depth === 0) return text.slice(start, i + 1);
-    }
+    if (trimmed.startsWith("END_PLAN")) break;
+    result += segment;
   }
-  // Incomplete stream: return the open object for partial field recovery.
-  return text.slice(start);
-}
-
-function unescapeJsonString(value: string): string {
-  try {
-    return JSON.parse(`"${value}"`) as string;
-  } catch {
-    return value
-      .replace(/\\n/g, "\n")
-      .replace(/\\"/g, "\"")
-      .replace(/\\\\/g, "\\");
-  }
-}
-
-function formatPlanSteps(steps: unknown[]): string {
-  return steps.map((step, index) => {
-    if (!step || typeof step !== "object") return `${index + 1}. （无效步骤）`;
-    const record = step as Record<string, unknown>;
-    const action = typeof record.action === "string" ? record.action : "";
-    const target = typeof record.target === "string" ? record.target : "";
-    const text = typeof record.text === "string" ? record.text : "";
-    const expected = typeof record.expected_change === "string" ? record.expected_change : "";
-    const risk = typeof record.risk === "string" ? record.risk : "";
-    const head = [action, target].filter(Boolean).join(" · ") || "步骤";
-    const lines = [`${index + 1}. ${head}`];
-    if (text) lines.push(`   ${text}`);
-    if (expected) lines.push(`   预期：${expected}`);
-    if (risk) lines.push(`   风险：${risk}`);
-    return lines.join("\n");
-  }).join("\n");
-}
-
-function formatParsedPlan(parsed: Record<string, unknown>): string | null {
-  if (typeof parsed.observation !== "string") return null;
-  const stepsSource = Array.isArray(parsed.steps)
-    ? parsed.steps
-    : parsed.step && typeof parsed.step === "object"
-      ? [parsed.step]
-      : [];
-  const steps = stepsSource.length ? formatPlanSteps(stepsSource) : "";
-  return [parsed.observation, steps ? `计划步骤：\n${steps}` : ""].filter(Boolean).join("\n\n");
-}
-
-/** Recover observation text from incomplete JSON while the model is still streaming. */
-function partialObservation(jsonLike: string): string | null {
-  const match = jsonLike.match(/"observation"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-  if (!match) {
-    // Unclosed observation string mid-stream.
-    const open = jsonLike.match(/"observation"\s*:\s*"((?:[^"\\]|\\.)*)/);
-    if (!open) return null;
-    return unescapeJsonString(open[1]);
-  }
-  return unescapeJsonString(match[1]);
-}
-
-function looksLikeRawJson(text: string): boolean {
-  const trimmed = text.trim();
-  return trimmed.startsWith("{") || trimmed.startsWith("```") || trimmed.startsWith("[");
+  return result.trim();
 }
 
 function llmResult(detail: string, streaming = false): string {
-  const normalized = normalizeModelDetail(detail);
+  const normalized = firstTaggedPlan(normalizeModelDetail(detail));
   if (!normalized) return streaming ? "正在生成模型结果…" : "";
 
-  const jsonCandidate = extractJsonObject(normalized) ?? normalized;
-  try {
-    const parsed = JSON.parse(jsonCandidate) as Record<string, unknown>;
-    const formatted = formatParsedPlan(parsed);
-    if (formatted) return formatted;
-  } catch {
-    // Incomplete or fence-wrapped payload — try to surface observation only.
+  const fields = new Map<string, string>();
+  for (const line of normalized.replace(/[；;]/g, "\n").split(/\r?\n/)) {
+    const pair = line.trim().match(/^([^:：]+)[:：]\s*(.*)$/);
+    if (!pair) continue;
+    const key = pair[1].trim().toUpperCase();
+    if (!fields.has(key)) fields.set(key, pair[2].trim());
   }
-
-  const observation = partialObservation(jsonCandidate);
-  if (observation) {
-    return streaming ? `${observation}\n\n（结果生成中…）` : observation;
-  }
-
-  // Never dump raw JSON / fences into the chat or result card.
-  if (looksLikeRawJson(normalized) || looksLikeRawJson(detail)) {
-    return streaming ? "正在整理模型结果…" : "模型结果已生成，但格式无法解析。";
-  }
-  return normalized;
+  const value = (...keys: string[]) => keys.map((key) => fields.get(key)).find(Boolean) ?? "";
+  const status = value("STATUS", "状态").toUpperCase();
+  const observation = value("OBSERVATION", "观察");
+  const action = value("ACTION", "动作");
+  const target = value("TARGET", "目标");
+  const expected = value("EXPECTED", "预期");
+  const summary = value("SUMMARY", "总结", "结果");
+  if (!status && !observation && !action) return normalized;
+  if (status.includes("DONE") || status.includes("完成")) return summary || observation;
+  const actionLine = [action, target].filter(Boolean).join(" · ");
+  return [observation, actionLine ? `下一步：${actionLine}` : "", expected ? `预期：${expected}` : "", streaming ? "（正在生成计划…）" : ""]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function modelOutputEvent(events: TaskEvent[]) {
