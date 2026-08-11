@@ -3,7 +3,7 @@ use image::{imageops::FilterType, DynamicImage, ImageFormat};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{env, io::Cursor, process::{Child, Command, Stdio}, sync::Mutex, time::Duration};
+use std::{env, io::{BufRead, BufReader, Cursor}, process::{Child, Command, Stdio}, sync::Mutex, time::Duration};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 use xcap::Monitor;
@@ -33,8 +33,8 @@ impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             server_path: r"D:\llama\llama-server.exe".into(),
-            model_path: r"model\Qwen3.5-2B-UD-Q4_K_XL.gguf".into(),
-            mmproj_path: r"model\mmproj-F16.gguf".into(),
+            model_path: r"D:\Projects\baodou\model\Qwen3.5-2B-UD-Q4_K_XL.gguf".into(),
+            mmproj_path: r"D:\Projects\baodou\model\mmproj-F16.gguf".into(),
             llama_url: LLAMA_ENDPOINT.into(),
         }
     }
@@ -166,11 +166,18 @@ fn config_file(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 }
 
 fn load_model_config(app: &AppHandle) -> ModelConfig {
-    config_file(app)
+    let config: ModelConfig = config_file(app)
         .ok()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if std::path::Path::new(&config.server_path).is_absolute()
+        && std::path::Path::new(&config.model_path).is_absolute()
+        && std::path::Path::new(&config.mmproj_path).is_absolute() {
+        config
+    } else {
+        ModelConfig::default()
+    }
 }
 
 #[tauri::command]
@@ -184,6 +191,11 @@ fn set_model_config(app: AppHandle, config: ModelConfig) -> Result<ModelConfig, 
         || config.mmproj_path.trim().is_empty() || config.llama_url.trim().is_empty() {
         return Err("模型程序、模型文件、MMPROJ 和接口 URL 都不能为空".into());
     }
+    if !std::path::Path::new(config.server_path.trim()).is_absolute()
+        || !std::path::Path::new(config.model_path.trim()).is_absolute()
+        || !std::path::Path::new(config.mmproj_path.trim()).is_absolute() {
+        return Err("llama-server、模型和 MMPROJ 路径必须使用绝对路径".into());
+    }
     let normalized = ModelConfig {
         server_path: config.server_path.trim().into(),
         model_path: config.model_path.trim().into(),
@@ -193,7 +205,24 @@ fn set_model_config(app: AppHandle, config: ModelConfig) -> Result<ModelConfig, 
     let path = config_file(&app)?;
     let content = serde_json::to_string_pretty(&normalized).map_err(|error| format!("配置序列化失败：{error}"))?;
     std::fs::write(path, content).map_err(|error| format!("配置保存失败：{error}"))?;
+    stop_model(&app);
+    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+        snapshot.model_ready = false;
+        snapshot.inference_backend = "llama-server · 正在按新配置重启".into();
+        snapshot.message = "配置已保存，正在停止旧模型并启动新模型…".into();
+    });
+    let handle = app.clone();
+    std::thread::spawn(move || start_model(handle));
     Ok(normalized)
+}
+
+fn stop_model(app: &AppHandle) {
+    let model_state = app.state::<ModelState>();
+    let mut process = model_state.process.lock().expect("model state poisoned");
+    if let Some(mut child) = process.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 fn llama_health(endpoint: &str) -> bool {
@@ -223,14 +252,9 @@ fn start_model(app: AppHandle) {
         return;
     }
 
-    let current_dir = env::current_dir().unwrap_or_default();
-    let resolve = |path: &str| {
-        let path = std::path::PathBuf::from(path);
-        if path.is_absolute() { path } else { current_dir.join(path) }
-    };
-    let server = resolve(&config.server_path);
-    let model = resolve(&config.model_path);
-    let mmproj = resolve(&config.mmproj_path);
+    let server = std::path::PathBuf::from(&config.server_path);
+    let model = std::path::PathBuf::from(&config.model_path);
+    let mmproj = std::path::PathBuf::from(&config.mmproj_path);
 
     if !server.exists() || !model.exists() || !mmproj.exists() {
         let missing = if !server.exists() { server.display().to_string() }
@@ -250,10 +274,17 @@ fn start_model(app: AppHandle) {
     });
     let port = endpoint
         .split(':').last().and_then(|value| value.split('/').next()).unwrap_or("8765");
+    let host = endpoint.split("://").nth(1).and_then(|value| value.split('/').next()).and_then(|value| value.split(':').next()).unwrap_or("[IP]");
+    let log_path = config_file(&app).ok().map(|path| path.with_file_name("llama-server.log"));
+    let log_file = log_path.and_then(|path| std::fs::OpenOptions::new().create(true).append(true).open(path).ok());
+    let log_error = log_file.as_ref().and_then(|file| file.try_clone().ok());
     let child = Command::new(&server)
         .current_dir(server.parent().unwrap_or(std::path::Path::new(".")))
+        .args(["--host", host])
         .args(["-m", model.to_string_lossy().as_ref(), "--mmproj", mmproj.to_string_lossy().as_ref(), "--host", "127.0.0.1", "--port", port, "--jinja"])
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .stdin(Stdio::null())
+        .stdout(log_file.map(Stdio::from).unwrap_or_else(Stdio::null))
+        .stderr(log_error.map(Stdio::from).unwrap_or_else(Stdio::null))
         .spawn();
     match child {
         Ok(child) => {
@@ -266,6 +297,16 @@ fn start_model(app: AppHandle) {
                         snapshot.message = "本地模型已就绪".into();
                     });
                     return;
+                }
+                if let Some(process) = app.state::<ModelState>().process.lock().expect("model state poisoned").as_mut() {
+                    if let Ok(Some(status)) = process.try_wait() {
+                        update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+                            snapshot.model_ready = false;
+                            snapshot.inference_backend = "llama-server · 进程已退出".into();
+                            snapshot.message = format!("模型进程启动后立即退出（{status}），详情见 llama-server.log");
+                        });
+                        return;
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
@@ -447,7 +488,7 @@ fn run_native_task(app: AppHandle, task_id: String, goal: String, live: bool, au
     };
 
     let plan = if live {
-        infer_plan(&goal, &frame, &load_model_config(&app).llama_url).unwrap_or_else(|error| fallback_plan(&goal, Some(error)))
+        infer_plan(&app, &task_id, &goal, &frame, &load_model_config(&app).llama_url).unwrap_or_else(|error| fallback_plan(&goal, Some(error)))
     } else {
         fallback_plan(&goal, None)
     };
@@ -478,11 +519,13 @@ fn run_native_task(app: AppHandle, task_id: String, goal: String, live: bool, au
         .pending_plan
         .lock()
         .expect("pending plan poisoned") = Some(plan.clone());
+    let requires_confirmation = plan.step.action != "wait";
     update_snapshot(&app.state::<RuntimeState>(), |s| {
         s.phase = "awaiting_user".into();
         s.model_ready = live;
         s.message = format!("{}：{}", plan.step.action, plan.step.target);
     });
+    if requires_confirmation {
     emit(
         &app,
         event(
@@ -493,13 +536,14 @@ fn run_native_task(app: AppHandle, task_id: String, goal: String, live: bool, au
                 "{}。动作：{}；目标：{}；预期：{}",
                 plan.observation, plan.step.action, plan.step.target, plan.step.expected_change
             ),
-            true,
+            requires_confirmation,
             false,
             true,
             Some(raw),
         ),
     );
-    if auto_confirm {
+    }
+    if auto_confirm || !requires_confirmation {
         let _ = confirm_task(app.clone(), app.state::<RuntimeState>());
     }
 }
@@ -599,7 +643,7 @@ fn capture_primary() -> Result<ScreenFrame, String> {
     })
 }
 
-fn infer_plan(goal: &str, frame: &ScreenFrame, endpoint: &str) -> Result<NativePlan, String> {
+fn infer_plan(app: &AppHandle, task_id: &str, goal: &str, frame: &ScreenFrame, endpoint: &str) -> Result<NativePlan, String> {
     let prompt = "You are a local Windows computer-use planner. Reply ONLY valid JSON: {\"observation\":string,\"steps\":[{\"action\":string,\"target\":string,\"x\":integer|null,\"y\":integer|null,\"text\":string|null,\"risk\":string,\"expected_change\":string}]}. Handle the user's requested observation or internal operation directly and return the next useful step.";
     let payload = json!({
         "messages": [
@@ -611,27 +655,46 @@ fn infer_plan(goal: &str, frame: &ScreenFrame, endpoint: &str) -> Result<NativeP
         ],
         "temperature": 0.2,
         "max_tokens": 500,
-        "stream": false
+        "stream": true
     });
     let client = Client::builder()
         .timeout(Duration::from_secs(60))
         .build()
         .map_err(|e| e.to_string())?;
-    let value: Value = client
+    let response = client
         .post(endpoint)
         .json(&payload)
         .send()
         .map_err(|e| format!("llama-server 不可用（{endpoint}）：{e}"))?
         .error_for_status()
-        .map_err(|e| format!("llama-server 返回错误：{e}"))?
-        .json()
-        .map_err(|e| format!("解析模型响应失败：{e}"))?;
-    let content = value
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .ok_or("模型响应缺少 content")?;
-    let parsed: Value = serde_json::from_str(strip_json_fence(content))
-        .map_err(|e| format!("模型未返回合法 JSON：{e}"))?;
+        .map_err(|e| format!("llama-server 返回错误：{e}"))?;
+    let mut content = String::new();
+    for line in BufReader::new(response).lines() {
+        let line = line.map_err(|e| format!("读取模型流失败：{e}"))?;
+        let Some(data) = line.strip_prefix("data:") else { continue };
+        let data = data.trim();
+        if data == "[DONE]" { break; }
+        if let Ok(value) = serde_json::from_str::<Value>(data) {
+            if let Some(delta) = value.pointer("/choices/0/delta/content").and_then(Value::as_str) {
+                content.push_str(delta);
+                emit(app, event(task_id, "planning", "模型输出中", content.clone(), false, false, true, None));
+            }
+        }
+    }
+    if content.trim().is_empty() { return Err("模型流没有返回内容".into()); }
+    let parsed: Value = match serde_json::from_str(strip_json_fence(&content)) {
+        Ok(value) => value,
+        Err(_) => {
+            return Ok(NativePlan {
+                observation: content.trim().to_string(),
+                step: PlanStep {
+                    action: "wait".into(), target: "当前前台应用".into(), x: None, y: None,
+                    text: None, risk: "low".into(), expected_change: "返回模型观察结果".into(),
+                },
+                blocked_reason: None,
+            });
+        }
+    };
     let observation = parsed
         .get("observation")
         .and_then(Value::as_str)
@@ -681,7 +744,7 @@ fn fallback_plan(goal: &str, model_error: Option<String>) -> NativePlan {
 
 fn execute_safe_action(plan: &NativePlan, live: bool) -> Result<String, String> {
     if plan.step.action == "wait" {
-        return Ok("已完成只读观察；未向系统注入输入".into());
+        return Ok(format!("模型结果：{}；已完成只读观察，未向系统注入输入", plan.observation));
     }
     if !live {
         return Ok("预览模式已确认计划；dry-run 未向系统注入输入".into());
