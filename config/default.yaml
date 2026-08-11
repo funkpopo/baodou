@@ -1,0 +1,88 @@
+# baodou default configuration (Phase B)
+# Override via BAODOU_CONFIG env or --config path.
+
+schema_version: "1.0.0"
+app:
+  name: baodou
+  env: dev
+  log_level: INFO          # DEBUG | INFO | WARNING | ERROR
+  log_json: true           # structured JSON logs to stdout
+  log_dir: logs            # relative to project root; empty = stdout only
+  graceful_shutdown_sec: 5
+
+paths:
+  project_root: null       # auto-detected if null
+  model_gguf: model/Qwen3.5-2B-UD-Q4_K_XL.gguf
+  mmproj_gguf: model/mmproj-F16.gguf
+  # Host machine (locked by Phase A / user env):
+  #   conda env: dev
+  #   llama SYCL build: D:\llama
+  #   oneAPI: D:\Intel\oneAPI\setvars.bat
+  llama_dir: "D:/llama"
+  oneapi_setvars: "D:/Intel/oneAPI/setvars.bat"
+
+inference:
+  host: "127.0.0.1"
+  port: 8765
+  n_ctx: 4096
+  n_gpu_layers: 99
+  device: "SYCL0"          # force GPU; never default to CPU
+  n_threads: 0             # 0 = auto (cpu_count - 2)
+  max_tokens: 768
+  temperature: 0.3
+  enable_thinking: false
+  request_timeout_sec: 60
+  health_timeout_sec: 5
+  mmproj_offload: true
+  # Phase B: use mock client unless BAODOU_INFERENCE=http
+  backend: mock            # mock | http
+
+capture:
+  mode: primary            # primary | all | window | region
+  target_fps: 5
+  max_width: 1280
+  max_height: 720
+  image_format: png
+  queue_size: 4
+  drop_policy: newest      # drop oldest when full, keep newest intent
+  # Phase B mock only
+  backend: mock
+
+ui_vision:
+  confidence_threshold: 0.5
+  max_elements: 64
+  timeout_ms: 1500
+  sources:
+    - mock
+  backend: mock
+
+agent:
+  max_steps: 8
+  default_risk_auto: false
+  plan_timeout_sec: 30
+  backend: mock
+
+actuator:
+  # Phase B: never real input
+  backend: mock
+  dry_run: true
+  max_actions_per_minute: 30
+
+safety:
+  default_mode: read_only  # read_only | confirm_all | allow_low
+  require_confirmation_below: medium  # low | medium | high
+  block_high_risk: true
+  sensitive_keywords:
+    - delete
+    - 删除
+    - payment
+    - 支付
+    - transfer
+    - 转账
+    - password
+    - 密码
+  audit_enabled: true
+
+frontend:
+  mode: cli
+  show_trace: true

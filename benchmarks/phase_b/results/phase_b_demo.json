@@ -1,0 +1,72 @@
+[
+  {
+    "goal": "描述当前屏幕",
+    "ok": true,
+    "trace_id": "tr-5401353c221b4f07",
+    "task_state": "completed",
+    "event_kinds": [
+      "frame",
+      "vision",
+      "inference",
+      "plan",
+      "done"
+    ],
+    "error": null,
+    "elapsed_ms": 37.970400000631344
+  },
+  {
+    "goal": "点击搜索按钮",
+    "ok": true,
+    "trace_id": "tr-fa76989ce61a476c",
+    "task_state": "completed",
+    "event_kinds": [
+      "frame",
+      "vision",
+      "inference",
+      "plan",
+      "safety",
+      "action",
+      "verification",
+      "done"
+    ],
+    "error": null,
+    "elapsed_ms": 43.887800002266886
+  },
+  {
+    "goal": "向搜索框输入文字",
+    "ok": true,
+    "trace_id": "tr-7299712b500b4651",
+    "task_state": "completed",
+    "event_kinds": [
+      "frame",
+      "vision",
+      "inference",
+      "plan",
+      "safety",
+      "action",
+      "verification",
+      "done"
+    ],
+    "error": null,
+    "elapsed_ms": 43.44169999967562
+  },
+  {
+    "goal": "删除文件并支付",
+    "ok": false,
+    "trace_id": "tr-9bddfb5c560a4723",
+    "task_state": "failed",
+    "event_kinds": [
+      "frame",
+      "vision",
+      "inference",
+      "plan",
+      "safety",
+      "error"
+    ],
+    "error": {
+      "error_code": "risk_blocked",
+      "error_message": "高风险操作被硬编码拦截"
+    },
+    "elapsed_ms": 37.2678999992786
+  }
+]
