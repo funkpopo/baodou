@@ -69,7 +69,10 @@ function App() {
           eventsRef.current = next;
           return next;
         }
-        const next = [...current.slice(-7), event];
+        // Keep the complete run trace visible after a terminal event. The
+        // conversation can span many observe/act/verify rounds; trimming to
+        // seven entries made the failure screen lose the evidence users need.
+        const next = [...current, event].slice(-100);
         eventsRef.current = next;
         return next;
       });
@@ -106,7 +109,7 @@ function App() {
 
   const latest = events.at(-1);
   const phaseLabel = useMemo(() => ({
-    idle: "待命", observing: "观察屏幕", planning: "生成计划", awaiting_user: "执行中",
+    idle: "待命", observing: "读取当前屏幕", planning: "判断下一步", awaiting_user: "等待确认",
     executing: "执行中", paused: "已暂停", stopped: "已停止", completed: "已完成", error: "需要处理",
   }[runtime.phase] ?? runtime.phase), [runtime.phase]);
 
@@ -561,29 +564,16 @@ function WorkflowPanel({
   const followUpRef = useRef<HTMLTextAreaElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const latest = events.at(-1);
-  const streamed = [...events].reverse().find((event) => event.phase === "planning" && event.title === "模型输出中");
   const terminalPhase = latest?.phase === "completed" || latest?.phase === "stopped" || latest?.phase === "error";
   // After a turn is archived into sessionTurns, avoid duplicating it as the live bubble.
   const latestArchived = sessionTurns.at(-1);
   const liveMatchesArchive = terminalPhase
     && !!latestArchived
     && latestArchived.id.startsWith(`${latest?.taskId || ""}:`);
-  const activityEvents = liveMatchesArchive
-    ? []
-    : events.filter((event) => event.title !== "模型输出中" && event.taskId !== "local-submit").slice(-6);
+  const activityEvents = events.filter((event) => event.taskId !== "local-submit");
+  const visibleSessionTurns = liveMatchesArchive ? sessionTurns.slice(0, -1) : sessionTurns;
   const canStop = !!latest && ["observing", "planning", "awaiting_user", "executing"].includes(latest.phase);
   const canFollowUp = !busy && (terminalPhase || (sessionTurns.length > 0 && events.length === 0) || latest?.phase === "paused");
-  const flow = [
-    { phase: "observing", label: "观察" },
-    { phase: "planning", label: "决定" },
-    { phase: "executing", label: "操作" },
-    { phase: "completed", label: "验证" },
-  ];
-  const reached = (phase: string) =>
-    events.some((event) => event.phase === phase)
-    || (phase === "planning" && !!streamed)
-    || (phase === "completed" && (latest?.phase === "completed" || latestArchived?.phase === "completed"));
-
   useEffect(() => {
     if (!canFollowUp || collapsed) return;
     const timer = window.setTimeout(() => followUpRef.current?.focus(), 180);
@@ -634,18 +624,6 @@ function WorkflowPanel({
         </div>
       </div>
 
-      <div className="workflow-flow">
-        {flow.map((item) => (
-          <span
-            className={`${reached(item.phase) ? "reached" : ""} ${latest?.phase === item.phase ? "active" : ""}`}
-            key={item.phase}
-          >
-            <i />
-            {item.label}
-          </span>
-        ))}
-      </div>
-
       <div className="workflow-panel-list" ref={listRef}>
         {sessionTurns.length === 0 && activityEvents.length === 0 && !busy ? (
           <div className="empty-state">
@@ -654,7 +632,7 @@ function WorkflowPanel({
           </div>
         ) : (
           <>
-            {sessionTurns.map((turn) => (
+            {visibleSessionTurns.map((turn) => (
               <div key={turn.id} className="turn-block">
                 <div className="turn-user">
                   <span className="turn-role">你</span>

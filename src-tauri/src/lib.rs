@@ -15,12 +15,13 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_MENU,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetWindowTextW, IsWindowVisible, SetForegroundWindow,
-    ShowWindow, SW_RESTORE,
+    BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
+    IsWindowVisible, SetForegroundWindow, ShowWindow, SW_RESTORE,
 };
 use xcap::Monitor;
 
@@ -598,53 +599,147 @@ fn run_native_task(app: AppHandle, task_id: String, goal: String) {
         let visible_windows = visible_window_titles().unwrap_or_default();
         let foreground_window = foreground_window_title().unwrap_or_else(|| "Unknown".into());
         let foreground_handle = unsafe { GetForegroundWindow().0 };
-        let plan = match infer_plan(
-            &app,
-            &task_id,
-            &goal,
-            &history,
-            &visible_windows,
-            &foreground_window,
-            step_index,
-            &frame,
-            &endpoint,
-        ) {
-            Ok(plan) => plan,
-            Err(error) => {
-                let should_resolve_intent = (step_index == 1 && error.contains("下一步动作"))
-                    || error.contains("重复激活当前前台窗口");
-                if should_resolve_intent {
-                    match infer_window_intent(&goal, &visible_windows, &endpoint) {
-                        Ok(Some(plan)) => plan,
-                        Ok(None) => {
-                            if let Some(plan) = launch_plan_from_goal(&goal, "模型未返回窗口意图")
-                            {
-                                plan
-                            } else {
-                                finish_with_error(&app, &task_id, "模型规划失败", error);
-                                return;
-                            }
-                        }
-                        Err(intent_error) => {
-                            if let Some(plan) = launch_plan_from_goal(&goal, &intent_error) {
-                                plan
-                            } else {
-                                finish_with_error(
-                                    &app,
-                                    &task_id,
-                                    "窗口意图判断失败",
-                                    format!("{error}；{intent_error}"),
-                                );
-                                return;
-                            }
-                        }
+        if step_index == 1 {
+            emit(
+                &app,
+                event(
+                    &task_id,
+                    "planning",
+                    "识别任务目标",
+                    format!(
+                        "正在根据任务目标绑定应用窗口；当前前台：{}，可见窗口：{} 个",
+                        foreground_window,
+                        visible_windows.len()
+                    ),
+                    false,
+                    false,
+                    true,
+                    None,
+                ),
+            );
+        }
+        let explicit_launch = if step_index == 1 && has_explicit_launch_intent(&goal) {
+            launch_plan_from_goal(&goal, "用户明确要求启动应用")
+        } else {
+            None
+        };
+        let plan = if let Some(plan) = explicit_launch {
+            plan
+        } else if step_index == 1 {
+            // Resolve the task's application/window target before UI planning.
+            // This is a harness boundary: an arbitrary visible system surface
+            // cannot become a target merely because it appears in the frame.
+            match infer_window_intent(&goal, &visible_windows, &endpoint) {
+                Ok(Some(plan)) => plan,
+                Ok(None) => {
+                    if let Some(plan) = launch_plan_from_goal(&goal, "未解析到可操作的现有窗口")
+                    {
+                        plan
+                    } else {
+                        finish_with_error(
+                            &app,
+                            &task_id,
+                            "任务目标解析失败",
+                            "无法从任务中解析应用启动目标".into(),
+                        );
+                        return;
                     }
-                } else {
-                    finish_with_error(&app, &task_id, "模型规划失败", error);
-                    return;
+                }
+                Err(_) => match infer_plan(
+                    &app,
+                    &task_id,
+                    &goal,
+                    &history,
+                    &visible_windows,
+                    &foreground_window,
+                    step_index,
+                    &frame,
+                    &endpoint,
+                ) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        finish_with_error(&app, &task_id, "模型规划失败", error);
+                        return;
+                    }
+                },
+            }
+        } else {
+            match infer_plan(
+                &app,
+                &task_id,
+                &goal,
+                &history,
+                &visible_windows,
+                &foreground_window,
+                step_index,
+                &frame,
+                &endpoint,
+            ) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    let should_resolve_intent = (step_index == 1 && error.contains("下一步动作"))
+                        || error.contains("重复激活当前前台窗口");
+                    if should_resolve_intent {
+                        match infer_window_intent(&goal, &visible_windows, &endpoint) {
+                            Ok(Some(plan)) => plan,
+                            Ok(None) => {
+                                if let Some(plan) =
+                                    launch_plan_from_goal(&goal, "模型未返回窗口意图")
+                                {
+                                    plan
+                                } else {
+                                    finish_with_error(&app, &task_id, "模型规划失败", error);
+                                    return;
+                                }
+                            }
+                            Err(intent_error) => {
+                                if let Some(plan) = launch_plan_from_goal(&goal, &intent_error) {
+                                    plan
+                                } else {
+                                    finish_with_error(
+                                        &app,
+                                        &task_id,
+                                        "窗口意图判断失败",
+                                        format!("{error}；{intent_error}"),
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                    } else {
+                        finish_with_error(&app, &task_id, "模型规划失败", error);
+                        return;
+                    }
                 }
             }
         };
+
+        if step_index == 1 {
+            let binding_detail = plan
+                .step
+                .as_ref()
+                .map(|step| {
+                    format!(
+                        "已绑定目标：{} · {}",
+                        action_label(&step.action),
+                        step.target
+                    )
+                })
+                .unwrap_or_else(|| "目标获取完成，正在进入验证".into());
+            emit(
+                &app,
+                event(
+                    &task_id,
+                    "planning",
+                    "目标已确定",
+                    binding_detail,
+                    false,
+                    false,
+                    true,
+                    None,
+                ),
+            );
+        }
 
         if !task_is_active(&app, &task_id) {
             return;
@@ -777,6 +872,10 @@ fn action_label(action: &str) -> &str {
         "切换窗口"
     } else if action.contains("click") {
         "点击"
+    } else if action.contains("clear") || action.contains("清空") || action.contains("清除") {
+        "清空字段"
+    } else if action.contains("replace") || action.contains("替换") {
+        "替换文本"
     } else if action.contains("input") || action.contains("type") {
         "输入文本"
     } else if action.contains("key") || action.contains("press") {
@@ -867,7 +966,7 @@ fn infer_plan(
     frame: &ScreenFrame,
     endpoint: &str,
 ) -> Result<NativePlan, String> {
-    let prompt = "You are a local Windows computer-use agent in an observe-act-verify loop. Return exactly ONE next action, never a sequence or a full future workflow. Do not output JSON. Put every field on its own line in this exact order:\nSTATUS: CONTINUE or DONE\nOBSERVATION: only what the screenshot currently proves\nACTION: activate_window, open_app, click, input, key, wait, or none\nTARGET: window title, app search query, or UI target\nX: integer or blank\nY: integer or blank\nTEXT: input text/key or blank\nEXPECTED: expected visible change after this one action\nSUMMARY: completion summary or blank\nEND_PLAN\nWrite STATUS exactly once and finish at END_PLAN. Do not predict later actions and do not repeat the template. Infer the application from user intent and the live window inventory, never from a built-in mapping. For activate_window, copy a distinctive substring from a real inventory title and never activate the already-current foreground window. Use open_app when no listed window matches. STATUS DONE is valid only when the latest screenshot proves the whole goal is complete; then ACTION must be none. Otherwise STATUS must be CONTINUE and ACTION must be executable. Never mark done merely because a window opened or an intermediate action succeeded.";
+    let prompt = "You are a local Windows computer-use agent in an observe-act-verify loop. Return exactly ONE next action, never a sequence or a full future workflow. Do not output JSON. Put every field on its own line in this exact order:\nSTATUS: CONTINUE or DONE\nOBSERVATION: only what the screenshot currently proves\nACTION: activate_window, open_app, click, input, replace, clear_search_bar, key, wait, or none\nTARGET: window title, app search query, or UI target\nX: integer or blank\nY: integer or blank\nTEXT: input text/key or blank\nEXPECTED: expected visible change after this one action\nSUMMARY: completion summary or blank\nEND_PLAN\nWrite STATUS exactly once and finish at END_PLAN. Do not predict later actions and do not repeat the template. Infer the application from user intent and the live window inventory, never from a built-in mapping. The window inventory is observation data, not an allow-list. Desktop, shell, settings, notifications, input-method windows, and text-input hosts must not be selected without positive evidence that they are the task application. For activate_window, copy a distinctive substring from a real inventory title and never activate the already-current foreground window. Use open_app when no listed window is clearly relevant. For a search or form field, first use clear_search_bar when stale text may exist; use replace to select all and enter new text atomically. Plain input appends and must only be used when appending is intended. STATUS DONE is valid only when the latest screenshot proves the whole goal is complete; then ACTION must be none. Otherwise STATUS must be CONTINUE and ACTION must be executable. Never mark done merely because a window opened or an intermediate action succeeded.";
     let history_text = if history.is_empty() {
         "No actions executed yet.".to_string()
     } else {
@@ -1106,7 +1205,7 @@ fn infer_window_intent(
     };
     let payload = json!({
         "messages": [
-            {"role": "system", "content": "Resolve Windows application intent without a built-in alias list. Do not output JSON. Reply with exactly three tagged lines: DECISION: WINDOW, LAUNCH, or NONE; TARGET: a real visible window-title substring for WINDOW, a concise Windows Search query for LAUNCH, or blank; REASON: one short reason. Prefer a matching visible window and never invent a window title."},
+            {"role": "system", "content": "Resolve the user's application target as a harness step, without any built-in application or window blacklist. Do not output JSON. Reply with exactly three tagged lines: DECISION: WINDOW, LAUNCH, or NONE; TARGET: a real visible window-title substring for WINDOW, a concise Windows Search query for LAUNCH, or blank; REASON: one short reason. Choose WINDOW only when the title itself provides positive evidence that it is the application needed for the user's goal. A visible title is not evidence merely because it exists, and a desktop, shell, settings, notification, input, or utility surface must not be selected as a fallback. If no candidate is clearly relevant, choose LAUNCH. Never invent a window title."},
             {"role": "user", "content": format!("User goal: {goal}\nVisible windows:\n{inventory}")}
         ],
         "temperature": 0.0,
@@ -1248,6 +1347,13 @@ fn launch_plan_from_goal(goal: &str, reason: &str) -> Option<NativePlan> {
     ))
 }
 
+fn has_explicit_launch_intent(goal: &str) -> bool {
+    let trimmed = goal.trim_start();
+    ["打开", "启动", "运行"]
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+}
+
 fn extract_launch_query(goal: &str) -> Option<String> {
     let goal = goal.trim();
     let prefixes = [
@@ -1345,6 +1451,18 @@ fn execute_plan(plan: &NativePlan, frame: &ScreenFrame) -> Result<String, String
         enigo
             .button(Button::Left, Direction::Click)
             .map_err(|error| format!("点击失败：{error}"))?;
+    } else if action.contains("clear_search_bar")
+        || action.contains("clear_search")
+        || action.contains("清空搜索")
+        || action.contains("清除搜索")
+    {
+        clear_focused_text(&mut enigo)?;
+    } else if action.contains("replace") || action.contains("替换") {
+        clear_focused_text(&mut enigo)?;
+        let text = step.text.as_deref().ok_or("替换动作缺少文本")?;
+        enigo
+            .text(text)
+            .map_err(|error| format!("替换文本失败：{error}"))?;
     } else if action.contains("type")
         || action.contains("input")
         || action.contains("输入")
@@ -1387,6 +1505,21 @@ fn execute_plan(plan: &NativePlan, frame: &ScreenFrame) -> Result<String, String
     }
 
     Ok(format!("{} · {}", action_label(&step.action), step.target))
+}
+
+fn clear_focused_text(enigo: &mut Enigo) -> Result<(), String> {
+    enigo
+        .key(enigo::Key::Control, Direction::Press)
+        .map_err(|error| format!("选择文本失败：{error}"))?;
+    enigo
+        .key(enigo::Key::Unicode('a'), Direction::Click)
+        .map_err(|error| format!("选择文本失败：{error}"))?;
+    enigo
+        .key(enigo::Key::Control, Direction::Release)
+        .map_err(|error| format!("选择文本失败：{error}"))?;
+    enigo
+        .key(enigo::Key::Backspace, Direction::Click)
+        .map_err(|error| format!("清空文本失败：{error}"))
 }
 
 fn launch_app_with_search(enigo: &mut Enigo, query: &str) -> Result<(), String> {
@@ -1491,11 +1624,27 @@ fn activate_window(target: &str) -> Result<(), String> {
             return Err(format!("没有找到窗口：{query}"));
         }
         let _ = ShowWindow(search.found, SW_RESTORE);
-        if !SetForegroundWindow(search.found).as_bool() {
-            return Err(format!("无法激活窗口：{query}"));
+        let current_thread = GetCurrentThreadId();
+        let target_thread = GetWindowThreadProcessId(search.found, None);
+        let attached = target_thread != 0
+            && target_thread != current_thread
+            && AttachThreadInput(current_thread, target_thread, true).as_bool();
+        let requested = SetForegroundWindow(search.found).as_bool();
+        let _ = BringWindowToTop(search.found);
+        if attached {
+            let _ = AttachThreadInput(current_thread, target_thread, false);
         }
+        for _ in 0..12 {
+            if GetForegroundWindow() == search.found {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if !requested {
+            return Err(format!("无法激活窗口：{query}（Windows 拒绝切换前台）"));
+        }
+        Err(format!("窗口激活调用成功，但“{query}”未成为前台窗口"))
     }
-    Ok(())
 }
 
 fn now() -> String {
@@ -1525,6 +1674,9 @@ mod tests {
             extract_launch_query("使用 Chrome 查看项目页面").as_deref(),
             Some("Chrome")
         );
+        assert!(has_explicit_launch_intent("打开浏览器搜索今天的天气"));
+        assert!(has_explicit_launch_intent("启动记事本"));
+        assert!(!has_explicit_launch_intent("在浏览器中搜索今天的天气"));
     }
 
     #[test]
@@ -1558,6 +1710,21 @@ mod tests {
         let step = plan.step.expect("action should contain a step");
         assert_eq!(step.action, "open_app");
         assert_eq!(step.target, "浏览器");
+    }
+
+    #[test]
+    fn parses_idempotent_field_actions() {
+        let plan = parse_model_plan(
+            "STATUS: CONTINUE\nOBSERVATION: 搜索框中有旧文本\nACTION: clear_search_bar\nTARGET: search bar\nEXPECTED: 搜索框为空",
+        )
+        .expect("clear action should parse");
+        assert_eq!(plan.step.expect("step").action, "clear_search_bar");
+
+        let plan = parse_model_plan(
+            "STATUS: CONTINUE\nOBSERVATION: 搜索框已清空\nACTION: replace\nTARGET: search bar\nTEXT: 今天的天气\nEXPECTED: 搜索框包含准确查询词",
+        )
+        .expect("replace action should parse");
+        assert_eq!(plan.step.expect("step").action, "replace");
     }
 
     #[test]
