@@ -162,18 +162,26 @@ UI / API / 日志
 
 ## 阶段 E：llama.cpp 推理层与 Qwen 适配
 
-- [ ] 固定并记录 llama.cpp 版本、编译选项和平台依赖。
-- [ ] 实现模型生命周期：加载、预热、推理、取消、释放和异常恢复。
-- [ ] 调整 `n_ctx`、线程数、批大小、GPU offload layers、KV cache 和 flash attention 等参数，并建立基准记录。
-- [ ] 实现文本、结构化 UI 摘要和图像输入的统一请求接口；若视觉输入需要额外投影文件或服务，封装为明确的适配器。
-- [ ] 为 Qwen 配置正确的 chat template、system prompt、停止词和最大输出长度。
-- [ ] 使用 JSON schema 或 grammar 约束输出，定义 `ScreenObservation`、`ActionPlan`、`Action`、`Verification` 等协议。
-- [ ] 实现流式输出，但只有在 JSON 完整且通过校验后才允许进入操作层。
-- [ ] 对模型输出进行 schema 校验、坐标范围校验、元素存在性校验和指令白名单校验。
-- [ ] 增加超时、取消、重试和降级策略：模型忙时返回最近可信状态或请求用户确认。
-- [ ] 建立 prompt 版本管理和回归样例，避免修改提示词后能力悄然下降。
+- [x] 固定并记录 llama.cpp 版本、编译选项和平台依赖。
+- [x] 实现模型生命周期：加载、预热、推理、取消、释放和异常恢复。
+- [x] 调整 `n_ctx`、线程数、批大小、GPU offload layers、KV cache 和 flash attention 等参数，并建立基准记录。
+- [x] 实现文本、结构化 UI 摘要和图像输入的统一请求接口；若视觉输入需要额外投影文件或服务，封装为明确的适配器。
+- [x] 为 Qwen 配置正确的 chat template、system prompt、停止词和最大输出长度。
+- [x] 使用 JSON schema 或 grammar 约束输出，定义 `ScreenObservation`、`ActionPlan`、`Action`、`Verification` 等协议。
+- [x] 实现流式输出，但只有在 JSON 完整且通过校验后才允许进入操作层。
+- [x] 对模型输出进行 schema 校验、坐标范围校验、元素存在性校验和指令白名单校验。
+- [x] 增加超时、取消、重试和降级策略：模型忙时返回最近可信状态或请求用户确认。
+- [x] 建立 prompt 版本管理和回归样例，避免修改提示词后能力悄然下降。
 
 **阶段验收：** 输入截图/结构化 UI 状态和用户任务后，模型能稳定输出合法的观察结果或动作计划；所有非法、越权和不完整输出都会被拒绝，不会直接触发系统输入。
+
+**阶段 E 完成记录（2026-08-11）：**
+- 后端：`D:\llama\llama-server` b10356 SYCL + oneAPI；强制 `SYCL0` / `-ngl 99` + mmproj
+- 模块：`inference/{server,http_client,prompts,schema,parse,validate,degrade,runtime_info}`
+- Prompt：`PROMPT_VERSION` + fixtures `benchmarks/phase_e/fixtures/`
+- CLI：`python -m frontend.cli infer info|prompts|server|once`
+- Bench：`python benchmarks/phase_e/run_inference_bench.py` → `benchmarks/phase_e/results/`
+- 文档：`docs/inference.md`
 
 ## 阶段 F：任务代理与操作状态机
 

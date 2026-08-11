@@ -1,0 +1,20 @@
+{
+  "kind": "observe_plan",
+  "observation": "model tries to run shell",
+  "confidence": 0.9,
+  "notes": "must reject",
+  "ui_candidates": [],
+  "plan": {
+    "goal": "run command",
+    "steps": [
+      {
+        "action": "shell_exec",
+        "target_element_id": "btn_search_01",
+        "risk": "high",
+        "requires_confirmation": false
+      }
+    ],
+    "stop_if": []
+  },
+  "needs_user_confirm": false
+}

@@ -1,0 +1,1 @@
+{"kind": "observe_plan", "observation": "this output was cut mid-way", "confidence": 0.5, "notes": "trunc", "ui_candidates": [{"element_id": "btn_search_01", "type": "button", "text": "搜索", "confidence": 0.9], "plan": {"goal": "x", "steps": [{"action": "click", "target_element_id": "btn_search_01", "risk": "low"

@@ -1,8 +1,9 @@
-"""CLI entry: config, mock demo, capture (C), UI vision (D)."""
+"""CLI entry: config, mock demo, capture (C), UI vision (D), inference (E)."""
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 import time
@@ -166,6 +167,75 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         dest="vis_log_level",
+    )
+
+    # --- Phase E inference ---
+    inf = sub.add_parser("infer", help="llama.cpp / Qwen inference (Phase E)")
+    inf_sub = inf.add_subparsers(dest="infer_cmd", required=True)
+
+    inf_info = inf_sub.add_parser("info", help="Record llama binary / config runtime info")
+    inf_info.add_argument("--json-out", type=str, default=None, help="Write runtime record JSON")
+    inf_info.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="inf_log_level",
+    )
+
+    inf_srv = inf_sub.add_parser("server", help="Manage llama-server lifecycle")
+    inf_srv.add_argument(
+        "action",
+        choices=["status", "start", "stop", "warmup", "recover"],
+        help="Lifecycle action",
+    )
+    inf_srv.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="inf_log_level",
+    )
+
+    inf_once = inf_sub.add_parser(
+        "once", help="Capture + UI vision + model observe/plan (mock or http)"
+    )
+    inf_once.add_argument(
+        "--backend",
+        choices=["mock", "http"],
+        default=None,
+        help="Override inference.backend",
+    )
+    inf_once.add_argument(
+        "--vision-backend",
+        choices=["composite", "uia", "ocr", "rules", "mock"],
+        default=None,
+    )
+    inf_once.add_argument("--goal", type=str, default="描述当前屏幕")
+    inf_once.add_argument(
+        "--mode",
+        choices=["observe_plan", "observation"],
+        default="observe_plan",
+    )
+    inf_once.add_argument("--no-image", action="store_true", help="Text+UI only (no screenshot)")
+    inf_once.add_argument("--stream", action="store_true", help="Use streaming gate")
+    inf_once.add_argument("--start-server", action="store_true", help="Auto-start llama-server")
+    inf_once.add_argument("--json-out", type=str, default=None)
+    inf_once.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="inf_log_level",
+    )
+
+    inf_reg = inf_sub.add_parser("prompts", help="Show prompt registry / versions")
+    inf_reg.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="inf_log_level",
     )
     return p
 
@@ -581,6 +651,225 @@ def cmd_vision_context(
     )
 
 
+def cmd_infer_info(config_path: str | None, json_out: str | None, log_level: str | None) -> int:
+    cfg = _setup_from_args(config_path, log_level)
+    from inference.runtime_info import collect_runtime_record
+
+    rec = collect_runtime_record(cfg)
+    _print_json(rec)
+    if json_out:
+        out = Path(json_out)
+        if not out.is_absolute():
+            out = PROJECT_ROOT / out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"wrote {out}", file=sys.stderr)
+    return 0 if rec.get("llama", {}).get("exists") else 1
+
+
+def cmd_infer_prompts(config_path: str | None, log_level: str | None) -> int:
+    _setup_from_args(config_path, log_level)
+    from inference.prompts import prompt_registry_meta
+
+    _print_json(prompt_registry_meta())
+    return 0
+
+
+def cmd_infer_server(config_path: str | None, action: str, log_level: str | None) -> int:
+    cfg = _setup_from_args(config_path, log_level)
+    from inference.server import LlamaServerManager
+
+    mgr = LlamaServerManager(cfg)
+    try:
+        if action == "status":
+            _print_json(mgr.status())
+            return 0 if mgr.health() else 1
+        if action == "start":
+            cfg.inference.auto_start_server = True
+            info = mgr.start(warmup=cfg.inference.warmup_on_start)
+            _print_json(info)
+            return 0
+        if action == "warmup":
+            if not mgr.health():
+                print("server not healthy; start first", file=sys.stderr)
+                return 1
+            _print_json(mgr.warmup())
+            return 0
+        if action == "recover":
+            _print_json(mgr.recover())
+            return 0
+        if action == "stop":
+            # Only stops process we manage in this process; external servers need manual kill.
+            mgr.stop(force=True)
+            _print_json(
+                {"stopped": True, "note": "managed process only; external server untouched"}
+            )
+            return 0
+    except Exception as exc:  # noqa: BLE001
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 1
+    return 2
+
+
+def cmd_infer_once(
+    config_path: str | None,
+    *,
+    backend: str | None,
+    vision_backend: str | None,
+    goal: str,
+    mode: str,
+    no_image: bool,
+    stream: bool,
+    start_server: bool,
+    json_out: str | None,
+    log_level: str | None,
+) -> int:
+    cfg = _setup_from_args(config_path, log_level)
+    if backend:
+        cfg.inference.backend = backend  # type: ignore[assignment]
+    if vision_backend:
+        cfg.ui_vision.backend = vision_backend  # type: ignore[assignment]
+        if vision_backend != "composite":
+            cfg.ui_vision.sources = [vision_backend]
+    if start_server:
+        cfg.inference.auto_start_server = True
+        cfg.inference.backend = "http"
+
+    from capture.factory import create_capture
+    from core.models import FrameKind
+    from inference.http_client import create_inference
+    from ui_vision.factory import create_ui_vision
+
+    # Prefer real capture for http; mock capture still works for offline.
+    if cfg.inference.backend == "http" and cfg.capture.backend == "mock":
+        cfg.capture.backend = "mss"
+
+    cap = create_capture(cfg)
+    vision = create_ui_vision(cfg)
+    inf = create_inference(cfg)
+    try:
+        if cfg.inference.backend == "http":
+            ready = inf.ensure_ready()
+            print(
+                json.dumps(
+                    {
+                        "server": {
+                            k: ready.get(k)
+                            for k in (
+                                "already_running",
+                                "started_by_us",
+                                "base",
+                                "load_ms",
+                                "vision",
+                            )
+                            if k in ready
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+
+        packet_meta = None
+        image = None
+        if hasattr(cap, "capture_packet"):
+            packet = cap.capture_packet(kind=FrameKind.MODEL, force=True, encode=True)  # type: ignore[attr-defined]
+            # Model path needs base64 on ScreenFrame (encode alone only fills image_bytes).
+            if not no_image and hasattr(packet, "attach_b64"):
+                with contextlib.suppress(Exception):
+                    packet.attach_b64()
+            frame = packet.meta
+            image = packet.image
+            packet_meta = frame
+        else:
+            frame = cap.capture()
+            packet_meta = frame
+
+        if no_image:
+            frame.image_b64 = None
+            frame.image_path = None
+
+        vis = vision.recognize(
+            frame,
+            trace_id=frame.trace_id,
+            image=image,
+            goal=goal,
+        )
+
+        if stream and cfg.inference.backend == "http":
+            final = None
+            for ev in inf.stream_observe(
+                frame,
+                vis,
+                user_goal=goal,
+                trace_id=frame.trace_id or "",
+                mode=mode,
+                include_image=not no_image,
+            ):
+                if ev.get("type") == "delta":
+                    continue
+                final = ev
+            if not final or not final.get("response"):
+                _print_json({"ok": False, "stream": final})
+                return 1
+            resp = final["response"]
+            ready_for_action = bool(final.get("ready_for_action"))
+        else:
+            resp = inf.observe(
+                frame,
+                vis,
+                user_goal=goal,
+                trace_id=frame.trace_id or "",
+                mode=mode,
+                include_image=not no_image,
+            )
+            ready_for_action = bool(resp.ok and resp.observation is not None)
+            # Plans are validated but still require Phase F safety before actuation.
+            if resp.plan and resp.plan.steps:
+                ready_for_action = bool(resp.ok)
+
+        payload = {
+            "ok": resp.ok,
+            "ready_for_action_candidate": ready_for_action,
+            "note": "validated plan is NOT executed here; Phase F safety/actuator required",
+            "trace_id": resp.trace_id,
+            "latency_ms": resp.latency_ms,
+            "error_code": resp.error_code,
+            "error_message": resp.error_message,
+            "frame": packet_meta.log_summary() if packet_meta else None,
+            "vision": vis.log_summary(),
+            "observation": resp.observation.log_summary() if resp.observation else None,
+            "plan": resp.plan.log_summary() if resp.plan else None,
+            "observation_text": (resp.observation.observation if resp.observation else "")[:500],
+            "raw_preview": (resp.raw_text or "")[:600],
+        }
+        _print_json(payload)
+        if json_out:
+            out = Path(json_out)
+            if not out.is_absolute():
+                out = PROJECT_ROOT / out
+            out.parent.mkdir(parents=True, exist_ok=True)
+            full = {
+                **payload,
+                "observation_full": resp.observation.model_dump(mode="json")
+                if resp.observation
+                else None,
+                "plan_full": resp.plan.model_dump(mode="json") if resp.plan else None,
+                "raw_text": resp.raw_text,
+            }
+            out.write_text(
+                json.dumps(full, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+            )
+            print(f"wrote {out}", file=sys.stderr)
+        # Phase E: structured observation (even degraded / plan-rejected) is a successful handle.
+        # Illegal plans never execute here; exit 0 means "safe structured result", not "plan approved".
+        return 0 if resp.observation is not None else 1
+    finally:
+        vision.close()
+        cap.close()
+        inf.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -628,6 +917,27 @@ def main(argv: list[str] | None = None) -> int:
                 args.config,
                 backend=args.backend,
                 goal=args.goal,
+                log_level=level,
+            )
+    if args.command == "infer":
+        level = getattr(args, "inf_log_level", None) or args.log_level
+        if args.infer_cmd == "info":
+            return cmd_infer_info(args.config, args.json_out, level)
+        if args.infer_cmd == "prompts":
+            return cmd_infer_prompts(args.config, level)
+        if args.infer_cmd == "server":
+            return cmd_infer_server(args.config, args.action, level)
+        if args.infer_cmd == "once":
+            return cmd_infer_once(
+                args.config,
+                backend=args.backend,
+                vision_backend=args.vision_backend,
+                goal=args.goal,
+                mode=args.mode,
+                no_image=args.no_image,
+                stream=args.stream,
+                start_server=args.start_server,
+                json_out=args.json_out,
                 log_level=level,
             )
     parser.error(f"unknown command {args.command}")

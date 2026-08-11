@@ -28,13 +28,24 @@ inference:
   n_gpu_layers: 99
   device: "SYCL0"          # force GPU; never default to CPU
   n_threads: 0             # 0 = auto (cpu_count - 2)
+  n_batch: 512
+  flash_attn: false        # enable if SYCL build supports -fa
   max_tokens: 768
   temperature: 0.3
   enable_thinking: false
-  request_timeout_sec: 60
+  request_timeout_sec: 90
   health_timeout_sec: 5
+  server_start_timeout_sec: 180
   mmproj_offload: true
-  backend: mock            # mock | http
+  backend: mock            # mock | http  (Phase E live: http)
+  auto_start_server: false # true = CLI can spawn D:\llama via oneAPI
+  warmup_on_start: true
+  constraint_mode: json_schema  # none | json_schema | grammar
+  stream: false
+  max_retries: 1
+  degrade_on_error: true
+  prompt_name: observe_plan
+  llama_build: "b10356"    # D:\llama llama-server version 10356 (0666ad2b2)
 
 capture:
   backend: mss             # mock | mss  (Phase C default: real capture)

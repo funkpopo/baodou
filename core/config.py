@@ -53,13 +53,27 @@ class InferenceSection(BaseModel):
     n_gpu_layers: int = 99
     device: str = "SYCL0"
     n_threads: int = 0
+    n_batch: int = 512
+    flash_attn: bool = False
     max_tokens: int = 768
     temperature: float = 0.3
     enable_thinking: bool = False
-    request_timeout_sec: float = 60.0
+    request_timeout_sec: float = 90.0
     health_timeout_sec: float = 5.0
+    server_start_timeout_sec: float = 180.0
     mmproj_offload: bool = True
     backend: Literal["mock", "http"] = "mock"
+    # Phase E
+    auto_start_server: bool = False
+    warmup_on_start: bool = True
+    # none | json_schema | grammar — client always validates; server constraint optional
+    constraint_mode: Literal["none", "json_schema", "grammar"] = "json_schema"
+    stream: bool = False
+    max_retries: int = 1
+    degrade_on_error: bool = True
+    prompt_name: str = "observe_plan"
+    # Recorded llama build (filled by runtime probe / docs; not required at load)
+    llama_build: str = "b10356"
 
     @property
     def base_url(self) -> str:

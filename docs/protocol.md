@@ -39,6 +39,19 @@
 - 绑定 `frame_id`；跨帧用 `element_stale` / `matches_hash` 判断失效
 - 模型上下文优先 `element_id`，禁止优先依赖裸坐标
 
+## 模型输出（阶段 E）
+
+模型原始文本必须先经 `inference.parse` + `inference.validate`：
+
+1. 提取完整 JSON（拒绝截断流）
+2. 归一为 `observe_plan` / `observation` schema
+3. 动作白名单、`element_id` 存在性、坐标物理 bounds
+4. 通过后才写入 `InferenceResponse.observation` / `.plan`
+
+非法输出：`ErrorCode.output_schema_invalid` 或降级为空 `ActionPlan`（`steps=[]`），**禁止**直达 actuator。
+
+Prompt 版本见 `inference.prompts.PROMPT_VERSION`；变更需同步 `benchmarks/phase_e/fixtures/`。
+
 ## 风险与确认
 
 ```text

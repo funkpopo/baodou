@@ -8,9 +8,9 @@
 | Python | **conda env `dev`**（Python 3.12） |
 | 推理二进制 | **`D:\llama`**（`llama-server.exe`，ggml-sycl） |
 | oneAPI | **`D:\Intel\oneAPI\setvars.bat`**（启动 server 前必须 call） |
-| 模型（可选，阶段 E） | `model/Qwen3.5-2B-UD-Q4_K_XL.gguf` + `mmproj-F16.gguf` |
+| 模型（阶段 E） | `model/Qwen3.5-2B-UD-Q4_K_XL.gguf` + `mmproj-F16.gguf` |
 
-阶段 B **默认使用 mock 后端**，无需 GPU / llama-server 即可跑通骨架与测试。
+默认 `inference.backend: mock` 时无需 GPU 即可测通校验与 CLI；live 推理设 `BAODOU_INFERENCE=http` 或 CLI `--backend http`，启动前 **call oneAPI setvars**（`infer server start` 会自动 call）。
 
 ## 安装
 
@@ -49,6 +49,12 @@ python -m pip install -e .
 | **UI 识别一次** | `python -m frontend.cli vision once --goal "点击搜索"` |
 | UI 紧凑上下文 | `python -m frontend.cli vision context --backend mock --goal "搜索"` |
 | 识别 bench（多分辨率） | `python benchmarks\phase_d\run_vision_bench.py` |
+| 推理运行时信息 | `python -m frontend.cli infer info` |
+| Prompt 版本 | `python -m frontend.cli infer prompts` |
+| 启动 llama-server | `python -m frontend.cli infer server start` |
+| **推理一次（mock）** | `python -m frontend.cli infer once --backend mock --vision-backend mock --goal "描述当前屏幕"` |
+| 推理一次（HTTP） | `python -m frontend.cli infer once --backend http --start-server --goal "描述当前屏幕"` |
+| 推理 bench | `python benchmarks\phase_e\run_inference_bench.py --mock` |
 
 安装 entry points 后也可用：
 

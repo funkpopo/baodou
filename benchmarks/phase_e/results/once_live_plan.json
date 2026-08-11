@@ -1,0 +1,177 @@
+{
+  "ok": false,
+  "ready_for_action_candidate": false,
+  "note": "validated plan is NOT executed here; Phase F safety/actuator required",
+  "trace_id": "",
+  "latency_ms": 7908.778599998186,
+  "error_code": "output_schema_invalid",
+  "error_message": "动作 click 缺少 target_element_id / target_point",
+  "frame": {
+    "frame_id": "frame-26b0e539025b",
+    "trace_id": "",
+    "frame_kind": "model",
+    "width": 1280,
+    "height": 720,
+    "physical_width": 1920,
+    "physical_height": 1080,
+    "origin_x": 0,
+    "origin_y": 0,
+    "dpi_scale": 1.0,
+    "scale_x": 1.5,
+    "scale_y": 1.5,
+    "monitor_index": 1,
+    "mode": "primary",
+    "capture_ms": 26.285899999493267,
+    "preprocess_ms": 10.796800001116935,
+    "changed": true,
+    "change_score": 1.0,
+    "image_bytes": 427146,
+    "has_image": true,
+    "masked_count": 0,
+    "window_title": null
+  },
+  "vision": {
+    "result_id": "vision-04cd25901a76",
+    "trace_id": "",
+    "frame_id": "frame-26b0e539025b",
+    "element_count": 4,
+    "latency_ms": 5.467599999974482,
+    "source": "mock",
+    "sources_used": [
+      "mock"
+    ],
+    "review_count": 0,
+    "dpi_scale": 1.0
+  },
+  "observation": {
+    "observation_id": "obs-6d8ef62742d9",
+    "trace_id": "",
+    "frame_id": "frame-26b0e539025b",
+    "element_count": 2,
+    "confidence": 0.98,
+    "latency_ms": 7908.778599998186,
+    "raw_truncated": false,
+    "observation_preview": "搜索框区域，右侧有搜索按钮，输入框为空。"
+  },
+  "plan": {
+    "plan_id": "plan-ba923fa4da62",
+    "trace_id": "",
+    "goal": "点击搜索按钮",
+    "step_count": 0,
+    "risk_max": "low",
+    "actions": []
+  },
+  "observation_text": "搜索框区域，右侧有搜索按钮，输入框为空。",
+  "raw_preview": "{\n  \"kind\": \"observe_plan\",\n  \"observation\": \"搜索框区域，右侧有搜索按钮，输入框为空。\",\n  \"confidence\": 0.98,\n  \"notes\": \"右侧面板有搜索框，目标元素为搜索按钮。\",\n  \"ui_candidates\": [\n    {\n      \"element_id\": \"btn_search_01\",\n      \"type\": \"button\",\n      \"text\": \"搜索\",\n      \"confidence\": 0.97\n    },\n    {\n      \"element_id\": \"inp_query_01\",\n      \"type\": \"input\",\n      \"text\": \"\",\n      \"confidence\": 0.95\n    }\n  ],\n  \"plan\": {\n    \"goal\": \"点击搜索按钮\",\n    \"steps\": [\n      {\n        \"action\": \"click\",\n        \"risk\": \"low\",\n        \"requires_confirmation\": false,\n        \"preconditions\": [\"btn_search_01 is clickable\"],\n        \"exp",
+  "observation_full": {
+    "protocol_version": "1.0.0",
+    "observation_id": "obs-6d8ef62742d9",
+    "trace_id": "",
+    "frame_id": "frame-26b0e539025b",
+    "timestamp": "2026-08-11T05:57:13.889012Z",
+    "observation": "搜索框区域，右侧有搜索按钮，输入框为空。",
+    "ui_elements": [
+      {
+        "protocol_version": "1.0.0",
+        "element_id": "btn_search_01",
+        "type": "button",
+        "role": "button",
+        "text": "搜索",
+        "name": "搜索",
+        "bbox": {
+          "x": 1720,
+          "y": 40,
+          "width": 96,
+          "height": 36
+        },
+        "bbox_logical": {
+          "x": 1720,
+          "y": 40,
+          "width": 96,
+          "height": 36
+        },
+        "confidence": 0.97,
+        "visible": true,
+        "enabled": true,
+        "clickable": true,
+        "editable": false,
+        "source": [
+          "mock"
+        ],
+        "frame_id": "frame-26b0e539025b",
+        "timestamp": "2026-08-11T05:57:05.979727Z",
+        "parent_id": "win_main_01",
+        "depth": 1,
+        "z_order": 0,
+        "content_hash": "2be13eb6c272",
+        "dpi_scale": 1.0,
+        "dpi_x": 96,
+        "dpi_y": 96,
+        "needs_review": false,
+        "conflict": false,
+        "native_id": null,
+        "extra": {}
+      },
+      {
+        "protocol_version": "1.0.0",
+        "element_id": "inp_query_01",
+        "type": "input",
+        "role": "textbox",
+        "text": "",
+        "name": "",
+        "bbox": {
+          "x": 800,
+          "y": 40,
+          "width": 280,
+          "height": 36
+        },
+        "bbox_logical": {
+          "x": 800,
+          "y": 40,
+          "width": 280,
+          "height": 36
+        },
+        "confidence": 0.95,
+        "visible": true,
+        "enabled": true,
+        "clickable": true,
+        "editable": true,
+        "source": [
+          "mock"
+        ],
+        "frame_id": "frame-26b0e539025b",
+        "timestamp": "2026-08-11T05:57:05.979727Z",
+        "parent_id": "win_main_01",
+        "depth": 1,
+        "z_order": 0,
+        "content_hash": "d837aac9b7a0",
+        "dpi_scale": 1.0,
+        "dpi_x": 96,
+        "dpi_y": 96,
+        "needs_review": false,
+        "conflict": false,
+        "native_id": null,
+        "extra": {}
+      }
+    ],
+    "notes": "右侧面板有搜索框，目标元素为搜索按钮。 | invalid: 动作 click 缺少 target_element_id / target_point",
+    "confidence": 0.98,
+    "model_name": "D:\\Projects\\baodou\\model\\Qwen3.5-2B-UD-Q4_K_XL.gguf",
+    "latency_ms": 7908.778599998186,
+    "raw_truncated": false
+  },
+  "plan_full": {
+    "protocol_version": "1.0.0",
+    "plan_id": "plan-ba923fa4da62",
+    "trace_id": "",
+    "goal": "点击搜索按钮",
+    "steps": [],
+    "stop_if": [
+      "model_degraded",
+      "target_missing"
+    ],
+    "risk_max": "low",
+    "created_at": "2026-08-11T05:57:13.889012Z"
+  },
+  "raw_text": "{\n  \"kind\": \"observe_plan\",\n  \"observation\": \"搜索框区域，右侧有搜索按钮，输入框为空。\",\n  \"confidence\": 0.98,\n  \"notes\": \"右侧面板有搜索框，目标元素为搜索按钮。\",\n  \"ui_candidates\": [\n    {\n      \"element_id\": \"btn_search_01\",\n      \"type\": \"button\",\n      \"text\": \"搜索\",\n      \"confidence\": 0.97\n    },\n    {\n      \"element_id\": \"inp_query_01\",\n      \"type\": \"input\",\n      \"text\": \"\",\n      \"confidence\": 0.95\n    }\n  ],\n  \"plan\": {\n    \"goal\": \"点击搜索按钮\",\n    \"steps\": [\n      {\n        \"action\": \"click\",\n        \"risk\": \"low\",\n        \"requires_confirmation\": false,\n        \"preconditions\": [\"btn_search_01 is clickable\"],\n        \"expected_change\": \"搜索框获得焦点\"\n      }\n    ],\n    \"stop_if\": [\"error\"]\n  },\n  \"needs_user_confirm\": false\n}"
+}
