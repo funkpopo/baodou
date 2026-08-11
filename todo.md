@@ -126,30 +126,39 @@ UI / API / 日志
 
 ### D1. 统一元素协议
 
-- [ ] 定义 `UIElement`：`id`、`type`、`text`、`role`、`bbox`、`center`、`confidence`、`visible`、`enabled`、`clickable`、`editable`、`source`、`timestamp`。
-- [ ] 定义元素类型：`window`、`dialog`、`button`、`input`、`checkbox`、`radio`、`tab`、`menu`、`menu_item`、`link`、`list`、`table`、`icon`、`text`、`image` 等。
-- [ ] 所有坐标统一使用屏幕物理像素，同时保留逻辑坐标和 DPI 信息，避免缩放导致误点。
-- [ ] 为每个识别结果生成稳定的短期 `element_id`，并通过 frame ID / hash 判断元素是否已经失效。
+- [x] 定义 `UIElement`：`id`、`type`、`text`、`role`、`bbox`、`center`、`confidence`、`visible`、`enabled`、`clickable`、`editable`、`source`、`timestamp`。
+- [x] 定义元素类型：`window`、`dialog`、`button`、`input`、`checkbox`、`radio`、`tab`、`menu`、`menu_item`、`link`、`list`、`table`、`icon`、`text`、`image` 等。
+- [x] 所有坐标统一使用屏幕物理像素，同时保留逻辑坐标和 DPI 信息，避免缩放导致误点。
+- [x] 为每个识别结果生成稳定的短期 `element_id`，并通过 frame ID / hash 判断元素是否已经失效。
 
 ### D2. 多来源识别管线
 
-- [ ] 优先接入操作系统无障碍/UI Automation 树，获取准确角色、文本、可操作性和原生边界框。
-- [ ] 接入 OCR，用于识别 UI Automation 无法覆盖的文字、画布、远程桌面和自绘控件。
-- [ ] 接入轻量级视觉检测模型或规则检测，用于定位图标、按钮、输入框、复选框、窗口边界和常见控件。
-- [ ] 对多个来源做去重、融合和置信度校准。
-- [ ] 对元素做层级化组织：窗口 → 容器 → 控件 → 文本/图标。
-- [ ] 支持 ROI 识别，只重新分析变化区域。
-- [ ] 设计识别器插件接口，便于未来替换 OCR、检测模型或接入特定应用适配器。
+- [x] 优先接入操作系统无障碍/UI Automation 树，获取准确角色、文本、可操作性和原生边界框。
+- [x] 接入 OCR，用于识别 UI Automation 无法覆盖的文字、画布、远程桌面和自绘控件。
+- [x] 接入轻量级视觉检测模型或规则检测，用于定位图标、按钮、输入框、复选框、窗口边界和常见控件。
+- [x] 对多个来源做去重、融合和置信度校准。
+- [x] 对元素做层级化组织：窗口 → 容器 → 控件 → 文本/图标。
+- [x] 支持 ROI 识别，只重新分析变化区域。
+- [x] 设计识别器插件接口，便于未来替换 OCR、检测模型或接入特定应用适配器。
 
 ### D3. 为 Qwen 提供紧凑上下文
 
-- [ ] 将识别结果序列化为紧凑 JSON/文本，包含元素 ID、类型、文本、坐标、状态和置信度。
-- [ ] 根据用户问题和当前任务筛选相关元素，避免把整个屏幕的冗余信息塞入上下文。
-- [ ] 对屏幕截图绘制编号框，模型输出使用 `element_id`，禁止优先依赖裸坐标。
-- [ ] 对低置信度或冲突元素标记为需要模型复核/用户确认。
-- [ ] 建立 UI 识别评测集，覆盖正常控件、暗色主题、小字体、遮挡、滚动、弹窗、远程桌面和自绘界面。
+- [x] 将识别结果序列化为紧凑 JSON/文本，包含元素 ID、类型、文本、坐标、状态和置信度。
+- [x] 根据用户问题和当前任务筛选相关元素，避免把整个屏幕的冗余信息塞入上下文。
+- [x] 对屏幕截图绘制编号框，模型输出使用 `element_id`，禁止优先依赖裸坐标。
+- [x] 对低置信度或冲突元素标记为需要模型复核/用户确认。
+- [x] 建立 UI 识别评测集，覆盖正常控件、暗色主题、小字体、遮挡、滚动、弹窗、远程桌面和自绘界面。
 
 **阶段验收：** 对评测集中的常见交互元素，能够返回准确的元素类型、文本和边界框；模型可以用元素 ID 指代目标，而不是依赖不稳定的自然语言描述或手写坐标。
+
+**阶段 D 完成记录（2026-08-11）：**
+- 默认 `ui_vision.backend: composite`（`uia` + `rules`；OCR 可选）
+- 坐标：物理像素 bbox + `bbox_logical` / `dpi_scale`；图像检测经 `image_to_screen`
+- 多分辨率：参数化单测（1.0/1.25/1.5/2.0）+ bench `multi_res_mock` / live `coord_audit`
+- CLI：`python -m frontend.cli vision once|context`
+- Bench：`python benchmarks/phase_d/run_vision_bench.py` → `benchmarks/phase_d/results/`
+- 文档：`docs/ui_vision.md`
+
 
 ## 阶段 E：llama.cpp 推理层与 Qwen 适配
 

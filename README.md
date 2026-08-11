@@ -11,8 +11,9 @@ UI 识别与模型解耦：识别提供 `element_id` + bbox，模型负责语义
 |---|---|
 | A 可行性 / 基线 | ✅ 完成（见 `docs/feasibility.md`） |
 | B 项目骨架 | ✅ 协议、配置、日志、mock 链路 |
-| **C 屏幕采集** | ✅ mss 多模式采集、坐标、有界队列、四类帧流 |
-| D+ UI 识别与后续 | ⏳ 未开始 |
+| C 屏幕采集 | ✅ mss 多模式采集、坐标、有界队列、四类帧流 |
+| **D UI 识别** | ✅ UIA + rules 融合、多分辨率坐标、紧凑上下文 |
+| E+ 推理与后续 | ⏳ 未开始 |
 
 ## 快速开始
 
@@ -23,10 +24,11 @@ python -m pip install -e ".[dev]"
 pytest
 python -m frontend.cli demo --goal "点击搜索按钮"
 python -m frontend.cli capture once --mode primary
+python -m frontend.cli vision once --goal "点击搜索"
 python -m frontend.cli capture stream --seconds 2
 ```
 
-更多：[`docs/setup.md`](docs/setup.md) · [`docs/capture.md`](docs/capture.md)
+更多：[`docs/setup.md`](docs/setup.md) · [`docs/capture.md`](docs/capture.md) · [`docs/ui_vision.md`](docs/ui_vision.md)
 
 ## 模块
 

@@ -104,10 +104,21 @@ capture:
 ui_vision:
   confidence_threshold: 0.5
   max_elements: 64
-  timeout_ms: 1500
+  timeout_ms: 2000
+  # composite = multi-source fuse (Phase D default on Windows)
+  backend: composite
   sources:
-    - mock
-  backend: mock
+    - uia
+    - rules
+    # - ocr   # enable when pytesseract + Tesseract OCR are installed
+  fuse_iou_threshold: 0.45
+  uia_max_depth: 12
+  ocr_enabled: true
+  ocr_lang: "chi_sim+eng"
+  ocr_min_confidence: 0.4
+  rules_enabled: true
+  context_max_elements: 32
+  annotate_boxes: true
 
 agent:
   max_steps: 8

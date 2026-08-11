@@ -158,8 +158,19 @@ class UIVisionSection(BaseModel):
     confidence_threshold: float = 0.5
     max_elements: int = 64
     timeout_ms: int = 1500
-    sources: list[str] = Field(default_factory=lambda: ["mock"])
-    backend: Literal["mock"] = "mock"
+    # Sources for composite backend: uia | ocr | rules | mock
+    sources: list[str] = Field(default_factory=lambda: ["uia", "rules"])
+    # mock | composite | uia | ocr | rules
+    backend: Literal["mock", "composite", "uia", "ocr", "rules"] = "composite"
+    fuse_iou_threshold: float = 0.45
+    uia_max_depth: int = 12
+    ocr_enabled: bool = True
+    ocr_lang: str = "chi_sim+eng"
+    ocr_min_confidence: float = 0.4
+    rules_enabled: bool = True
+    # Compact context for the model (Phase D3)
+    context_max_elements: int = 32
+    annotate_boxes: bool = True
 
 
 class AgentSection(BaseModel):
@@ -235,6 +246,7 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         "BAODOU_N_CTX": ("inference", "n_ctx"),
         "BAODOU_N_GPU_LAYERS": ("inference", "n_gpu_layers"),
         "BAODOU_DEVICE": ("inference", "device"),
+        "BAODOU_UI_VISION": ("ui_vision", "backend"),
     }
     for env_key, path in mapping.items():
         raw = os.environ.get(env_key)

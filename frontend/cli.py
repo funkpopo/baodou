@@ -1,4 +1,4 @@
-"""CLI entry: config, mock demo, capture pipeline (Phase C)."""
+"""CLI entry: config, mock demo, capture (C), UI vision (D)."""
 
 from __future__ import annotations
 
@@ -14,6 +14,16 @@ from core.logging import get_logger, setup_logging
 from core.pipeline import MockPipeline
 
 _log = get_logger("frontend.cli")
+
+
+def _print_json(payload: object) -> None:
+    """Print JSON safely on Windows GBK consoles (UIA names may contain special chars)."""
+    text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        sys.stdout.buffer.write((text + "\n").encode(enc, errors="replace"))
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -110,6 +120,53 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         dest="cap_log_level",
     )
+
+    # --- Phase D UI vision ---
+    vis = sub.add_parser("vision", help="UI recognition (Phase D)")
+    vis_sub = vis.add_subparsers(dest="vision_cmd", required=True)
+
+    vonce = vis_sub.add_parser("once", help="Capture + recognize UI elements once")
+    vonce.add_argument(
+        "--backend",
+        choices=["composite", "uia", "ocr", "rules", "mock"],
+        default=None,
+        help="Override ui_vision.backend",
+    )
+    vonce.add_argument(
+        "--mode",
+        choices=["primary", "all", "window", "region"],
+        default=None,
+    )
+    vonce.add_argument("--window-title", type=str, default=None)
+    vonce.add_argument("--region", type=str, default=None, help="x,y,w,h physical pixels (ROI)")
+    vonce.add_argument("--goal", type=str, default=None, help="Filter compact context by goal")
+    vonce.add_argument(
+        "--annotate",
+        type=str,
+        default=None,
+        help="Save numbered-box annotation image path",
+    )
+    vonce.add_argument("--json-out", type=str, default=None, help="Write full vision JSON")
+    vonce.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="vis_log_level",
+    )
+
+    vctx = vis_sub.add_parser("context", help="Print compact element list for the model")
+    vctx.add_argument(
+        "--backend", choices=["composite", "uia", "ocr", "rules", "mock"], default=None
+    )
+    vctx.add_argument("--goal", type=str, default=None)
+    vctx.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="vis_log_level",
+    )
     return p
 
 
@@ -190,6 +247,8 @@ def cmd_health(config_path: str | None, probe_http: bool) -> int:
         "llama_dir_exists": cfg.paths.llama_dir.exists(),
         "inference_backend": cfg.inference.backend,
         "capture_backend": cfg.capture.backend,
+        "ui_vision_backend": cfg.ui_vision.backend,
+        "ui_vision_sources": cfg.ui_vision.sources,
     }
     try:
         from capture.geometry import list_monitors, virtual_desktop
@@ -341,6 +400,187 @@ def cmd_capture_stream(config_path: str | None, seconds: float, log_level: str |
     return 0 if bounded else 1
 
 
+def _parse_region(region: str | None) -> dict[str, int] | None:
+    if not region:
+        return None
+    parts = [int(x.strip()) for x in region.split(",")]
+    if len(parts) != 4:
+        raise ValueError("region must be x,y,w,h")
+    return {"x": parts[0], "y": parts[1], "width": parts[2], "height": parts[3]}
+
+
+def cmd_vision_once(
+    config_path: str | None,
+    *,
+    backend: str | None,
+    mode: str | None,
+    window_title: str | None,
+    region: str | None,
+    goal: str | None,
+    annotate: str | None,
+    json_out: str | None,
+    log_level: str | None,
+) -> int:
+    cfg = _setup_from_args(config_path, log_level)
+    if backend:
+        cfg.ui_vision.backend = backend  # type: ignore[assignment]
+        if backend != "composite":
+            cfg.ui_vision.sources = [backend]
+    cfg.capture.backend = "mss"
+    if mode:
+        cfg.capture.mode = mode  # type: ignore[assignment]
+    if window_title:
+        cfg.capture.mode = "window"
+        cfg.capture.window_title = window_title
+    roi = None
+    try:
+        region_dict = _parse_region(region)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if region_dict and mode == "region":
+        cfg.capture.mode = "region"
+        cfg.capture.region = region_dict
+    elif region_dict:
+        from core.models import BBox
+
+        roi = BBox(
+            x=region_dict["x"],
+            y=region_dict["y"],
+            width=region_dict["width"],
+            height=region_dict["height"],
+        )
+
+    from capture.mss_backend import MssCapture
+    from core.models import FrameKind
+    from ui_vision.context import annotate_from_frame, serialize_for_model, serialize_text_summary
+    from ui_vision.factory import create_ui_vision
+
+    cap = MssCapture(cfg)
+    vision = create_ui_vision(cfg)
+    try:
+        packet = cap.capture_packet(kind=FrameKind.VISION, force=True, encode=True)
+        result = vision.recognize(
+            packet.meta,
+            trace_id=packet.meta.trace_id,
+            image=packet.image,
+            roi=roi,
+            goal=goal,
+        )
+        compact = serialize_for_model(
+            result, goal=goal, max_elements=cfg.ui_vision.context_max_elements
+        )
+        # Multi-res sanity: every center must map back into image bounds roughly
+        coord_ok = True
+        samples = []
+        for el in result.elements[:12]:
+            c = el.center
+            img_pt = packet.meta.screen_to_image(c.x, c.y)
+            inside = 0 <= img_pt.x < packet.meta.width and 0 <= img_pt.y < packet.meta.height
+            # Allow slight tolerance for chrome outside scaled ROI
+            if (
+                el.visible
+                and (el.clickable or el.editable)
+                and not inside
+                and not (
+                    -2 <= img_pt.x < packet.meta.width + 2
+                    and -2 <= img_pt.y < packet.meta.height + 2
+                )
+            ):
+                coord_ok = False
+            samples.append(
+                {
+                    "element_id": el.element_id,
+                    "type": el.type.value,
+                    "text": el.text[:40],
+                    "center": c.model_dump(),
+                    "image_xy": img_pt.model_dump(),
+                    "dpi_scale": el.dpi_scale,
+                    "source": el.source,
+                }
+            )
+
+        ann_path = None
+        if annotate or cfg.ui_vision.annotate_boxes:
+            out_ann = (
+                Path(annotate)
+                if annotate
+                else (
+                    PROJECT_ROOT
+                    / "benchmarks"
+                    / "phase_d"
+                    / "artifacts"
+                    / f"annotate_{packet.meta.frame_id}.png"
+                )
+            )
+            if not out_ann.is_absolute():
+                out_ann = PROJECT_ROOT / out_ann
+            if packet.image is not None:
+                ann = annotate_from_frame(
+                    packet.image,
+                    result,
+                    packet.meta.screen_to_image,
+                    goal=goal,
+                    max_draw=cfg.ui_vision.context_max_elements,
+                )
+                out_ann.parent.mkdir(parents=True, exist_ok=True)
+                ann.save(out_ann)
+                ann_path = str(out_ann)
+
+        payload = {
+            "ok": coord_ok and len(result.elements) >= 0,
+            "coord_ok": coord_ok,
+            "vision": result.log_summary(),
+            "frame": packet.meta.log_summary(),
+            "compact_count": len(compact),
+            "compact": compact[:24],
+            "samples": samples,
+            "text_summary": serialize_text_summary(
+                result, goal=goal, max_elements=min(16, cfg.ui_vision.context_max_elements)
+            ),
+            "annotate": ann_path,
+        }
+        _print_json(payload)
+        if json_out:
+            out = Path(json_out)
+            if not out.is_absolute():
+                out = PROJECT_ROOT / out
+            out.parent.mkdir(parents=True, exist_ok=True)
+            full = {
+                **payload,
+                "elements": [e.model_dump(mode="json") for e in result.elements],
+                "compact_all": compact,
+            }
+            out.write_text(
+                json.dumps(full, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+            )
+            print(f"wrote {out}", file=sys.stderr)
+    finally:
+        vision.close()
+        cap.close()
+    return 0
+
+
+def cmd_vision_context(
+    config_path: str | None,
+    *,
+    backend: str | None,
+    goal: str | None,
+    log_level: str | None,
+) -> int:
+    return cmd_vision_once(
+        config_path,
+        backend=backend or "mock",
+        mode="primary",
+        window_title=None,
+        region=None,
+        goal=goal,
+        annotate=None,
+        json_out=None,
+        log_level=log_level,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -369,6 +609,27 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.capture_cmd == "stream":
             return cmd_capture_stream(args.config, args.seconds, level)
+    if args.command == "vision":
+        level = getattr(args, "vis_log_level", None) or args.log_level
+        if args.vision_cmd == "once":
+            return cmd_vision_once(
+                args.config,
+                backend=args.backend,
+                mode=args.mode,
+                window_title=args.window_title,
+                region=args.region,
+                goal=args.goal,
+                annotate=args.annotate,
+                json_out=args.json_out,
+                log_level=level,
+            )
+        if args.vision_cmd == "context":
+            return cmd_vision_context(
+                args.config,
+                backend=args.backend,
+                goal=args.goal,
+                log_level=level,
+            )
     parser.error(f"unknown command {args.command}")
     return 2
 

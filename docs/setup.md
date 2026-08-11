@@ -46,6 +46,9 @@ python -m pip install -e .
 | 单次截图 | `python -m frontend.cli capture once --mode primary` |
 | 实时流（有界队列） | `python -m frontend.cli capture stream --seconds 2` |
 | 采集 bench | `python benchmarks\phase_c\run_capture_bench.py` |
+| **UI 识别一次** | `python -m frontend.cli vision once --goal "点击搜索"` |
+| UI 紧凑上下文 | `python -m frontend.cli vision context --backend mock --goal "搜索"` |
+| 识别 bench（多分辨率） | `python benchmarks\phase_d\run_vision_bench.py` |
 
 安装 entry points 后也可用：
 
@@ -62,6 +65,7 @@ baodou-demo
   - `BAODOU_LOG_LEVEL=DEBUG`
   - `BAODOU_INFERENCE=mock|http`
   - `BAODOU_CAPTURE=mock|mss`
+  - `BAODOU_UI_VISION=mock|composite|uia|ocr|rules`
   - `BAODOU_LLAMA_HOST` / `BAODOU_LLAMA_PORT`
   - `BAODOU_N_CTX` / `BAODOU_N_GPU_LAYERS` / `BAODOU_DEVICE`
 

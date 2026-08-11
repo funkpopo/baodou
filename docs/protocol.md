@@ -27,13 +27,17 @@
 
 ## 坐标约定
 
-- `BBox` / 点击目标默认使用**屏幕物理像素**
-- 逻辑坐标与 DPI 在 `ScreenFrame.dpi_scale` 中保留，阶段 C 完善换算
+- `BBox` / 点击目标默认使用**屏幕物理像素**（虚拟桌面，与鼠标一致）
+- `ScreenFrame.dpi_scale` + `scale_x/y`：图像像素 ↔ 物理像素（阶段 C）
+- `UIElement.bbox_logical` + `dpi_scale`：逻辑/DIP 备份，避免高 DPI 误点（阶段 D）
+- 图像源检测（OCR/rules）必须经 `frame.image_to_screen` 再写入 `UIElement`
 
 ## 元素 ID
 
-- 短期稳定 id，例如 `btn_search_01`
-- 绑定 `frame_id`；跨帧需重新识别（阶段 D 做 hash/失效）
+- 短期稳定 id：`{type_prefix}_{content_hash[:8]}`（如 `btn_a3f2c101`）；mock demo 保留 `btn_search_01`
+- `content_hash`：type + 规范化文本 + 量化 bbox + role
+- 绑定 `frame_id`；跨帧用 `element_stale` / `matches_hash` 判断失效
+- 模型上下文优先 `element_id`，禁止优先依赖裸坐标
 
 ## 风险与确认
 
@@ -66,10 +70,14 @@ SafetyDecision.allowed / requires_confirmation / blocked_by
   "role": "button",
   "text": "搜索",
   "bbox": { "x": 1080, "y": 40, "width": 96, "height": 36 },
+  "bbox_logical": { "x": 720, "y": 27, "width": 64, "height": 24 },
   "confidence": 0.97,
   "clickable": true,
-  "source": ["mock"],
-  "frame_id": "frame-..."
+  "dpi_scale": 1.5,
+  "content_hash": "a3f2c1b4d5e6",
+  "source": ["uia", "ocr"],
+  "frame_id": "frame-...",
+  "needs_review": false
 }
 ```
 

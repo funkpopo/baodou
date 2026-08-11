@@ -289,12 +289,24 @@ class ScreenFrame(BaseModel):
 
 
 class UIElement(BaseModel):
+    """One recognized UI element.
+
+    Coordinate contract (Phase D / multi-resolution):
+    - ``bbox`` is always **virtual-desktop physical pixels** (same space as mouse).
+    - ``bbox_logical`` is optional DIP/logical pixels when DPI scale is known.
+    - ``dpi_scale`` / ``dpi_x`` / ``dpi_y`` document the host monitor scaling.
+    - Image-space detections must be converted via ``ScreenFrame.image_to_screen``
+      before becoming a ``UIElement``.
+    """
+
     protocol_version: str = PROTOCOL_VERSION
     element_id: str
     type: ElementType = ElementType.OTHER
     role: str = ""
     text: str = ""
+    name: str = ""
     bbox: BBox
+    bbox_logical: BBox | None = None
     confidence: float = Field(ge=0.0, le=1.0, default=0.5)
     visible: bool = True
     enabled: bool = True
@@ -303,11 +315,36 @@ class UIElement(BaseModel):
     source: list[str] = Field(default_factory=list)
     frame_id: str = ""
     timestamp: datetime = Field(default_factory=_utcnow)
+    # Hierarchy / identity (Phase D)
+    parent_id: str | None = None
+    depth: int = 0
+    z_order: int = 0
+    content_hash: str = ""
+    dpi_scale: float = 1.0
+    dpi_x: int = 96
+    dpi_y: int = 96
+    needs_review: bool = False
+    conflict: bool = False
+    native_id: str | None = None
+    extra: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def center(self) -> Point:
         cx, cy = self.bbox.center()
         return Point(x=cx, y=cy)
+
+    def is_stale_for_frame(self, frame_id: str) -> bool:
+        return bool(self.frame_id) and self.frame_id != frame_id
+
+    def matches_hash(self, other: UIElement, *, iou_min: float = 0.5) -> bool:
+        """Short-term identity: same content_hash or high IoU + type/text."""
+        if self.content_hash and other.content_hash and self.content_hash == other.content_hash:
+            return True
+        if self.type != other.type:
+            return False
+        if (self.text or "").strip() != (other.text or "").strip():
+            return False
+        return bbox_iou(self.bbox, other.bbox) >= iou_min
 
 
 class UIVisionResult(BaseModel):
@@ -320,6 +357,16 @@ class UIVisionResult(BaseModel):
     latency_ms: float | None = None
     source: str = "mock"
     notes: str = ""
+    sources_used: list[str] = Field(default_factory=list)
+    roi: BBox | None = None
+    dpi_scale: float = 1.0
+    review_count: int = 0
+
+    def by_id(self, element_id: str) -> UIElement | None:
+        return next((e for e in self.elements if e.element_id == element_id), None)
+
+    def interactive(self) -> list[UIElement]:
+        return [e for e in self.elements if e.clickable or e.editable]
 
     def log_summary(self) -> dict[str, Any]:
         return {
@@ -329,7 +376,27 @@ class UIVisionResult(BaseModel):
             "element_count": len(self.elements),
             "latency_ms": self.latency_ms,
             "source": self.source,
+            "sources_used": self.sources_used,
+            "review_count": self.review_count,
+            "dpi_scale": self.dpi_scale,
         }
+
+
+def bbox_iou(a: BBox, b: BBox) -> float:
+    """Intersection-over-union for two physical-pixel boxes."""
+    x1 = max(a.x, b.x)
+    y1 = max(a.y, b.y)
+    x2 = min(a.x + a.width, b.x + b.width)
+    y2 = min(a.y + a.height, b.y + b.height)
+    iw = max(0, x2 - x1)
+    ih = max(0, y2 - y1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    union = a.width * a.height + b.width * b.height - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
 
 
 # ---------------------------------------------------------------------------

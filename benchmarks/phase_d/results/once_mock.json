@@ -1,0 +1,484 @@
+{
+  "ok": true,
+  "coord_ok": true,
+  "vision": {
+    "result_id": "vision-8cfde3f85744",
+    "trace_id": "",
+    "frame_id": "frame-2c29d70f70f5",
+    "element_count": 4,
+    "latency_ms": 5.40250000267406,
+    "source": "mock",
+    "sources_used": [
+      "mock"
+    ],
+    "review_count": 0,
+    "dpi_scale": 1.0
+  },
+  "frame": {
+    "frame_id": "frame-2c29d70f70f5",
+    "trace_id": "",
+    "frame_kind": "vision",
+    "width": 1280,
+    "height": 720,
+    "physical_width": 1920,
+    "physical_height": 1080,
+    "origin_x": 0,
+    "origin_y": 0,
+    "dpi_scale": 1.0,
+    "scale_x": 1.5,
+    "scale_y": 1.5,
+    "monitor_index": 1,
+    "mode": "primary",
+    "capture_ms": 27.418099998612888,
+    "preprocess_ms": 10.883399998419918,
+    "changed": true,
+    "change_score": 1.0,
+    "image_bytes": 381419,
+    "has_image": false,
+    "masked_count": 0,
+    "window_title": null
+  },
+  "compact_count": 4,
+  "compact": [
+    {
+      "element_id": "btn_search_01",
+      "type": "button",
+      "text": "搜索",
+      "role": "button",
+      "bbox": {
+        "x": 1720,
+        "y": 40,
+        "width": 96,
+        "height": 36
+      },
+      "center": {
+        "x": 1768,
+        "y": 58
+      },
+      "confidence": 0.97,
+      "clickable": true,
+      "editable": false,
+      "enabled": true,
+      "visible": true,
+      "needs_review": false,
+      "source": [
+        "mock"
+      ]
+    },
+    {
+      "element_id": "inp_query_01",
+      "type": "input",
+      "text": "",
+      "role": "textbox",
+      "bbox": {
+        "x": 800,
+        "y": 40,
+        "width": 280,
+        "height": 36
+      },
+      "center": {
+        "x": 940,
+        "y": 58
+      },
+      "confidence": 0.95,
+      "clickable": true,
+      "editable": true,
+      "enabled": true,
+      "visible": true,
+      "needs_review": false,
+      "source": [
+        "mock"
+      ]
+    },
+    {
+      "element_id": "btn_ok_01",
+      "type": "button",
+      "text": "确定",
+      "role": "button",
+      "bbox": {
+        "x": 920,
+        "y": 1000,
+        "width": 80,
+        "height": 32
+      },
+      "center": {
+        "x": 960,
+        "y": 1016
+      },
+      "confidence": 0.92,
+      "clickable": true,
+      "editable": false,
+      "enabled": true,
+      "visible": true,
+      "needs_review": false,
+      "source": [
+        "mock"
+      ]
+    },
+    {
+      "element_id": "win_main_01",
+      "type": "window",
+      "text": "Mock Desktop",
+      "role": "window",
+      "bbox": {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 1080
+      },
+      "center": {
+        "x": 960,
+        "y": 540
+      },
+      "confidence": 0.99,
+      "clickable": false,
+      "editable": false,
+      "enabled": true,
+      "visible": true,
+      "needs_review": false,
+      "source": [
+        "mock"
+      ]
+    }
+  ],
+  "samples": [
+    {
+      "element_id": "win_main_01",
+      "type": "window",
+      "text": "Mock Desktop",
+      "center": {
+        "x": 960,
+        "y": 540
+      },
+      "image_xy": {
+        "x": 640,
+        "y": 360
+      },
+      "dpi_scale": 1.0,
+      "source": [
+        "mock"
+      ]
+    },
+    {
+      "element_id": "btn_search_01",
+      "type": "button",
+      "text": "搜索",
+      "center": {
+        "x": 1768,
+        "y": 58
+      },
+      "image_xy": {
+        "x": 1179,
+        "y": 39
+      },
+      "dpi_scale": 1.0,
+      "source": [
+        "mock"
+      ]
+    },
+    {
+      "element_id": "inp_query_01",
+      "type": "input",
+      "text": "",
+      "center": {
+        "x": 940,
+        "y": 58
+      },
+      "image_xy": {
+        "x": 627,
+        "y": 39
+      },
+      "dpi_scale": 1.0,
+      "source": [
+        "mock"
+      ]
+    },
+    {
+      "element_id": "btn_ok_01",
+      "type": "button",
+      "text": "确定",
+      "center": {
+        "x": 960,
+        "y": 1016
+      },
+      "image_xy": {
+        "x": 640,
+        "y": 677
+      },
+      "dpi_scale": 1.0,
+      "source": [
+        "mock"
+      ]
+    }
+  ],
+  "text_summary": "frame_id=frame-2c29d70f70f5 elements=4 dpi_scale=1.00\n[1] id=btn_search_01 type=button text='搜索' clickable=True conf=0.97\n[2] id=inp_query_01 type=input text='' clickable=True conf=0.95\n[3] id=btn_ok_01 type=button text='确定' clickable=True conf=0.92\n[4] id=win_main_01 type=window text='Mock Desktop' clickable=False conf=0.99",
+  "annotate": "D:\\Projects\\baodou\\benchmarks\\phase_d\\artifacts\\annotate_frame-2c29d70f70f5.png",
+  "elements": [
+    {
+      "protocol_version": "1.0.0",
+      "element_id": "win_main_01",
+      "type": "window",
+      "role": "window",
+      "text": "Mock Desktop",
+      "name": "Mock Desktop",
+      "bbox": {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 1080
+      },
+      "bbox_logical": {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 1080
+      },
+      "confidence": 0.99,
+      "visible": true,
+      "enabled": true,
+      "clickable": false,
+      "editable": false,
+      "source": [
+        "mock"
+      ],
+      "frame_id": "frame-2c29d70f70f5",
+      "timestamp": "2026-08-11T05:26:18.959774Z",
+      "parent_id": null,
+      "depth": 0,
+      "z_order": 0,
+      "content_hash": "b2a5ded53b47",
+      "dpi_scale": 1.0,
+      "dpi_x": 96,
+      "dpi_y": 96,
+      "needs_review": false,
+      "conflict": false,
+      "native_id": null,
+      "extra": {}
+    },
+    {
+      "protocol_version": "1.0.0",
+      "element_id": "btn_search_01",
+      "type": "button",
+      "role": "button",
+      "text": "搜索",
+      "name": "搜索",
+      "bbox": {
+        "x": 1720,
+        "y": 40,
+        "width": 96,
+        "height": 36
+      },
+      "bbox_logical": {
+        "x": 1720,
+        "y": 40,
+        "width": 96,
+        "height": 36
+      },
+      "confidence": 0.97,
+      "visible": true,
+      "enabled": true,
+      "clickable": true,
+      "editable": false,
+      "source": [
+        "mock"
+      ],
+      "frame_id": "frame-2c29d70f70f5",
+      "timestamp": "2026-08-11T05:26:18.959774Z",
+      "parent_id": "win_main_01",
+      "depth": 1,
+      "z_order": 0,
+      "content_hash": "2be13eb6c272",
+      "dpi_scale": 1.0,
+      "dpi_x": 96,
+      "dpi_y": 96,
+      "needs_review": false,
+      "conflict": false,
+      "native_id": null,
+      "extra": {}
+    },
+    {
+      "protocol_version": "1.0.0",
+      "element_id": "inp_query_01",
+      "type": "input",
+      "role": "textbox",
+      "text": "",
+      "name": "",
+      "bbox": {
+        "x": 800,
+        "y": 40,
+        "width": 280,
+        "height": 36
+      },
+      "bbox_logical": {
+        "x": 800,
+        "y": 40,
+        "width": 280,
+        "height": 36
+      },
+      "confidence": 0.95,
+      "visible": true,
+      "enabled": true,
+      "clickable": true,
+      "editable": true,
+      "source": [
+        "mock"
+      ],
+      "frame_id": "frame-2c29d70f70f5",
+      "timestamp": "2026-08-11T05:26:18.959774Z",
+      "parent_id": "win_main_01",
+      "depth": 1,
+      "z_order": 0,
+      "content_hash": "d837aac9b7a0",
+      "dpi_scale": 1.0,
+      "dpi_x": 96,
+      "dpi_y": 96,
+      "needs_review": false,
+      "conflict": false,
+      "native_id": null,
+      "extra": {}
+    },
+    {
+      "protocol_version": "1.0.0",
+      "element_id": "btn_ok_01",
+      "type": "button",
+      "role": "button",
+      "text": "确定",
+      "name": "确定",
+      "bbox": {
+        "x": 920,
+        "y": 1000,
+        "width": 80,
+        "height": 32
+      },
+      "bbox_logical": {
+        "x": 920,
+        "y": 1000,
+        "width": 80,
+        "height": 32
+      },
+      "confidence": 0.92,
+      "visible": true,
+      "enabled": true,
+      "clickable": true,
+      "editable": false,
+      "source": [
+        "mock"
+      ],
+      "frame_id": "frame-2c29d70f70f5",
+      "timestamp": "2026-08-11T05:26:18.959774Z",
+      "parent_id": "win_main_01",
+      "depth": 1,
+      "z_order": 0,
+      "content_hash": "d6408b202e4b",
+      "dpi_scale": 1.0,
+      "dpi_x": 96,
+      "dpi_y": 96,
+      "needs_review": false,
+      "conflict": false,
+      "native_id": null,
+      "extra": {}
+    }
+  ],
+  "compact_all": [
+    {
+      "element_id": "btn_search_01",
+      "type": "button",
+      "text": "搜索",
+      "role": "button",
+      "bbox": {
+        "x": 1720,
+        "y": 40,
+        "width": 96,
+        "height": 36
+      },
+      "center": {
+        "x": 1768,
+        "y": 58
+      },
+      "confidence": 0.97,
+      "clickable": true,
+      "editable": false,
+      "enabled": true,
+      "visible": true,
+      "needs_review": false,
+      "source": [
+        "mock"
+      ]
+    },
+    {
+      "element_id": "inp_query_01",
+      "type": "input",
+      "text": "",
+      "role": "textbox",
+      "bbox": {
+        "x": 800,
+        "y": 40,
+        "width": 280,
+        "height": 36
+      },
+      "center": {
+        "x": 940,
+        "y": 58
+      },
+      "confidence": 0.95,
+      "clickable": true,
+      "editable": true,
+      "enabled": true,
+      "visible": true,
+      "needs_review": false,
+      "source": [
+        "mock"
+      ]
+    },
+    {
+      "element_id": "btn_ok_01",
+      "type": "button",
+      "text": "确定",
+      "role": "button",
+      "bbox": {
+        "x": 920,
+        "y": 1000,
+        "width": 80,
+        "height": 32
+      },
+      "center": {
+        "x": 960,
+        "y": 1016
+      },
+      "confidence": 0.92,
+      "clickable": true,
+      "editable": false,
+      "enabled": true,
+      "visible": true,
+      "needs_review": false,
+      "source": [
+        "mock"
+      ]
+    },
+    {
+      "element_id": "win_main_01",
+      "type": "window",
+      "text": "Mock Desktop",
+      "role": "window",
+      "bbox": {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 1080
+      },
+      "center": {
+        "x": 960,
+        "y": 540
+      },
+      "confidence": 0.99,
+      "clickable": false,
+      "editable": false,
+      "enabled": true,
+      "visible": true,
+      "needs_review": false,
+      "source": [
+        "mock"
+      ]
+    }
+  ]
+}
