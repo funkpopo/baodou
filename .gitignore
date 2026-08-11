@@ -1,66 +1,38 @@
-# baodou .gitignore
+# Node / React
+node_modules/
+dist/
 
-# --- Model weights (large binaries; keep README / small metadata if needed) ---
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+.tauri/
+
+# Local model weights and runtime data
 *.gguf
 *.ggufi
+model/
 model/**
-!model/README.md
-!model/configuration.json
+logs/
+artifacts/
+benchmarks/
 
-# --- Python ---
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-*.pyd
-*.egg-info/
-.eggs/
-dist/
-build/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-.tox/
-.venv/
-venv/
-ENV/
-env/
-
-# --- IDE / OS ---
-.vscode/
-.idea/
-*.swp
-*.swo
-*.sublime-project
-*.sublime-workspace
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# --- Secrets / local env ---
+# Local settings and secrets
 .env
 .env.local
 .env.*.local
 
-# --- Logs & temp ---
-logs/
-*.log
-*.tmp
-*.temp
-*.bak
+# IDE / operating system
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
 
-# --- Runtime artifacts (benchmarks keep small JSON via negation if needed) ---
-artifacts/
-**/artifacts/
-benchmarks/**/results/*.png
-benchmarks/**/results/*.txt
-
-# Conda env exports (optional local)
-conda-envs/
-
-desktop/node_modules/
-dist
-target/
-.tauri
+# Previous Python implementation caches. These files are not part of the project.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
