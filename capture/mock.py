@@ -34,19 +34,31 @@ class MockCapture(CaptureBackend):
         # Simulate modest capture latency.
         time.sleep(0.01)
         elapsed = (time.perf_counter() - t0) * 1000
+        w = self.config.capture.max_width
+        h = self.config.capture.max_height
         frame = ScreenFrame(
             trace_id=trace_id,
             mode=CaptureMode(self.config.capture.mode)
             if self.config.capture.mode in CaptureMode._value2member_map_
             else CaptureMode.PRIMARY,
-            monitor_index=0,
-            width=self.config.capture.max_width,
-            height=self.config.capture.max_height,
+            monitor_index=getattr(self.config.capture, "monitor_index", 0) or 0,
+            width=w,
+            height=h,
+            origin_x=0,
+            origin_y=0,
+            physical_width=w,
+            physical_height=h,
+            logical_width=float(w),
+            logical_height=float(h),
             dpi_scale=1.0,
+            scale_x=1.0,
+            scale_y=1.0,
             image_format=self.config.capture.image_format,
             image_path=None,
             image_b64=None,
             capture_ms=elapsed,
+            changed=True,
+            change_score=1.0,
             extra={"backend": "mock", "synthetic": True},
         )
         log_event(_log, "capture.frame", **frame.log_summary())

@@ -73,7 +73,7 @@ src = [
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
-ignore = ["E501"]
+ignore = ["E501", "UP046"]
 
 [tool.ruff.format]
 quote-style = "double"

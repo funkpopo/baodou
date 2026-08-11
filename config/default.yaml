@@ -1,4 +1,4 @@
-# baodou default configuration (Phase B)
+# baodou default configuration
 # Override via BAODOU_CONFIG env or --config path.
 
 schema_version: "1.0.0"
@@ -34,19 +34,72 @@ inference:
   request_timeout_sec: 60
   health_timeout_sec: 5
   mmproj_offload: true
-  # Phase B: use mock client unless BAODOU_INFERENCE=http
   backend: mock            # mock | http
 
 capture:
+  backend: mss             # mock | mss  (Phase C default: real capture)
   mode: primary            # primary | all | window | region
-  target_fps: 5
+  monitor_index: 1         # 0=virtual all, 1..=physical (1 often primary)
+  target_fps: 5            # default loop rate when stream fps not used
   max_width: 1280
   max_height: 720
-  image_format: png
+  image_format: png        # png | jpeg
+  jpeg_quality: 85
+  color_mode: RGB
   queue_size: 4
-  drop_policy: newest      # drop oldest when full, keep newest intent
-  # Phase B mock only
-  backend: mock
+  drop_policy: newest      # newest keeps latest under backpressure
+  region: null             # {x,y,width,height} physical virtual-desktop px
+  window_title: null
+  window_hwnd: null
+  change_threshold: 0.015  # mean abs diff on 64x64 sample (0..1-ish)
+  change_sample_size: 64
+  force_on_user_request: true
+  force_on_verify: true
+  save_frames: false
+  save_dir: benchmarks/phase_c/artifacts
+  include_b64: false
+  privacy:
+    enabled: true
+    mask_color: [0, 0, 0]
+    manual_masks: []       # [{x,y,width,height,reason}]
+    privacy_window_titles:
+      - "密码"
+      - "Password"
+      - "Credential"
+      - "银行"
+      - "Bank"
+    mask_password_class_names:
+      - "Edit"
+      - "PasswordBox"
+  streams:
+    preview:
+      fps: 10
+      max_width: 960
+      max_height: 540
+      image_format: jpeg
+      jpeg_quality: 70
+      only_on_change: false
+    vision:
+      fps: 8
+      max_width: 1280
+      max_height: 720
+      image_format: png
+      jpeg_quality: 85
+      only_on_change: true
+    model:
+      fps: 0               # event-driven (user question / planner)
+      max_width: 1280
+      max_height: 720
+      image_format: png
+      jpeg_quality: 85
+      only_on_change: true
+    verify:
+      fps: 0               # after action
+      max_width: 1280
+      max_height: 720
+      image_format: png
+      jpeg_quality: 85
+      only_on_change: false
 
 ui_vision:
   confidence_threshold: 0.5
@@ -63,7 +116,6 @@ agent:
   backend: mock
 
 actuator:
-  # Phase B: never real input
   backend: mock
   dry_run: true
   max_actions_per_minute: 30

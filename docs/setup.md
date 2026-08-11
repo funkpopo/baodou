@@ -42,6 +42,10 @@ python -m pip install -e .
 | **Mock 全链路 demo** | `python -m frontend.cli demo --goal "点击搜索按钮"` |
 | 只读观察 demo | `python -m frontend.cli demo --goal "描述当前屏幕"` |
 | 写出链路 JSON | `python -m frontend.cli demo --json-out benchmarks/phase_b/results/demo.json` |
+| 显示器列表 | `python -m frontend.cli capture monitors` |
+| 单次截图 | `python -m frontend.cli capture once --mode primary` |
+| 实时流（有界队列） | `python -m frontend.cli capture stream --seconds 2` |
+| 采集 bench | `python benchmarks\phase_c\run_capture_bench.py` |
 
 安装 entry points 后也可用：
 

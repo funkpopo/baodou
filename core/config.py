@@ -66,15 +66,92 @@ class InferenceSection(BaseModel):
         return f"http://{self.host}:{self.port}"
 
 
+class StreamProfile(BaseModel):
+    """Per-kind capture quality / rate (0 fps = event-driven only)."""
+
+    fps: float = 0.0
+    max_width: int = 1280
+    max_height: int = 720
+    image_format: Literal["png", "jpeg"] = "png"
+    jpeg_quality: int = 85
+    only_on_change: bool = False
+
+
+class PrivacySection(BaseModel):
+    enabled: bool = True
+    mask_color: list[int] = Field(default_factory=lambda: [0, 0, 0])
+    # Manual masks in virtual-desktop physical pixels: {x,y,width,height,reason?}
+    manual_masks: list[dict[str, Any]] = Field(default_factory=list)
+    # Title substrings → full-window mask when capturing that window / if visible.
+    privacy_window_titles: list[str] = Field(
+        default_factory=lambda: ["密码", "Password", "Credential", "银行", "Bank"]
+    )
+    mask_password_class_names: list[str] = Field(
+        default_factory=lambda: ["Edit", "PasswordBox"]  # heuristic; refined in later phases
+    )
+
+
 class CaptureSection(BaseModel):
     mode: Literal["primary", "all", "window", "region"] = "primary"
+    # mss monitor index: 0 = virtual all, 1..N = physical (1 usually primary)
+    monitor_index: int = 1
     target_fps: float = 5.0
     max_width: int = 1280
     max_height: int = 720
-    image_format: str = "png"
+    image_format: Literal["png", "jpeg"] = "png"
+    jpeg_quality: int = 85
+    color_mode: Literal["RGB", "L"] = "RGB"
     queue_size: int = 4
     drop_policy: Literal["newest", "oldest"] = "newest"
-    backend: Literal["mock", "mss"] = "mock"
+    backend: Literal["mock", "mss"] = "mss"
+    # Region mode (physical virtual-desktop pixels)
+    region: dict[str, int] | None = None
+    # Window mode
+    window_title: str | None = None
+    window_hwnd: int | None = None
+    # Change detection
+    change_threshold: float = 0.015
+    change_sample_size: int = 64
+    force_on_user_request: bool = True
+    force_on_verify: bool = True
+    # Save optional artifacts under project
+    save_frames: bool = False
+    save_dir: str = "benchmarks/phase_c/artifacts"
+    include_b64: bool = False
+    privacy: PrivacySection = Field(default_factory=PrivacySection)
+    streams: dict[str, StreamProfile] = Field(
+        default_factory=lambda: {
+            "preview": StreamProfile(
+                fps=10.0,
+                max_width=960,
+                max_height=540,
+                image_format="jpeg",
+                jpeg_quality=70,
+                only_on_change=False,
+            ),
+            "vision": StreamProfile(
+                fps=8.0,
+                max_width=1280,
+                max_height=720,
+                image_format="png",
+                only_on_change=True,
+            ),
+            "model": StreamProfile(
+                fps=0.0,
+                max_width=1280,
+                max_height=720,
+                image_format="png",
+                only_on_change=True,
+            ),
+            "verify": StreamProfile(
+                fps=0.0,
+                max_width=1280,
+                max_height=720,
+                image_format="png",
+                only_on_change=False,
+            ),
+        }
+    )
 
 
 class UIVisionSection(BaseModel):
@@ -151,6 +228,8 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         "BAODOU_LOG_LEVEL": ("app", "log_level"),
         "BAODOU_INFERENCE": ("inference", "backend"),
         "BAODOU_CAPTURE": ("capture", "backend"),
+        "BAODOU_CAPTURE_MODE": ("capture", "mode"),
+        "BAODOU_MONITOR_INDEX": ("capture", "monitor_index"),
         "BAODOU_LLAMA_HOST": ("inference", "host"),
         "BAODOU_LLAMA_PORT": ("inference", "port"),
         "BAODOU_N_CTX": ("inference", "n_ctx"),
@@ -163,7 +242,7 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
             continue
         section, key = path
         bucket = data.setdefault(section, {})
-        if key in ("port", "n_ctx", "n_gpu_layers"):
+        if key in ("port", "n_ctx", "n_gpu_layers", "monitor_index"):
             bucket[key] = int(raw)
         else:
             bucket[key] = raw

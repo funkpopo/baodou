@@ -102,18 +102,25 @@ UI / API / 日志
 
 ## 阶段 C：屏幕采集与实时帧管线
 
-- [ ] 实现全屏、指定窗口和指定区域三种采集模式。
-- [ ] 支持多显示器、不同 DPI/缩放比例、坐标原点和屏幕旋转等坐标系统处理。
-- [ ] 对截图进行缩放、色彩转换、压缩和 ROI 裁剪，减少传给识别器和模型的数据量。
-- [ ] 实现帧变化检测：只有屏幕发生明显变化、用户提出新问题或当前动作需要验证时才触发后续处理。
-- [ ] 设计有界队列和丢帧策略，保证推理变慢时不会无限堆积旧帧。
-- [ ] 区分“预览帧”“识别帧”“模型帧”“验证帧”，分别配置频率和质量。
-- [ ] 记录截图时间戳、屏幕尺寸、DPI、窗口信息和 frame ID。
-- [ ] 处理敏感区域遮罩，支持密码框、隐私窗口和用户手动屏蔽区域。
+- [x] 实现全屏、指定窗口和指定区域三种采集模式（`capture/mss_backend.py` + `window_win.py`；mode=`primary|all|window|region`）。
+- [x] 支持多显示器、不同 DPI/缩放比例、坐标原点和屏幕旋转等坐标系统处理（`capture/geometry.py`；`ScreenFrame.image_to_screen` / `screen_to_image`）。
+- [x] 对截图进行缩放、色彩转换、压缩和 ROI 裁剪，减少传给识别器和模型的数据量（`capture/preprocess.py`）。
+- [x] 实现帧变化检测：只有屏幕发生明显变化、用户提出新问题或当前动作需要验证时才触发后续处理（`capture/change.py` + pipeline force flags）。
+- [x] 设计有界队列和丢帧策略，保证推理变慢时不会无限堆积旧帧（`capture/queue.py`，`drop_policy: newest`）。
+- [x] 区分“预览帧”“识别帧”“模型帧”“验证帧”，分别配置频率和质量（`FrameKind` + `capture.streams.*`）。
+- [x] 记录截图时间戳、屏幕尺寸、DPI、窗口信息和 frame ID（扩展 `ScreenFrame`）。
+- [x] 处理敏感区域遮罩，支持密码框、隐私窗口和用户手动屏蔽区域（`capture/privacy.py`；标题启发式 + manual_masks）。
 
 **建议初始目标：** UI 识别在稳定场景下约 5~15 FPS；大模型视觉理解按事件触发，不强制每帧运行；端到端首个可用结果目标为 1~3 秒，再根据硬件优化。
 
 **阶段验收：** 在单屏和多屏、不同缩放比例下，截图坐标与实际鼠标坐标一致；高频屏幕变化不会导致内存持续增长或队列失控。
+
+**阶段 C 完成记录（2026-08-11）：**
+- 默认 `capture.backend: mss`；环境：conda `dev` · 双屏 1920×1080
+- CLI：`python -m frontend.cli capture monitors|once|stream`
+- Bench：`python benchmarks/phase_c/run_capture_bench.py` → `benchmarks/phase_c/results/`
+- 文档：`docs/capture.md`
+
 
 ## 阶段 D：UI 识别框架
 

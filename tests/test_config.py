@@ -18,6 +18,11 @@ def test_load_default_config() -> None:
     assert cfg.actuator.dry_run is True
     assert cfg.paths.project_root is not None
     assert cfg.paths.model_gguf.is_absolute()
+    assert cfg.capture.backend in ("mss", "mock")
+    assert "preview" in cfg.capture.streams
+    assert "vision" in cfg.capture.streams
+    assert "model" in cfg.capture.streams
+    assert "verify" in cfg.capture.streams
 
 
 def test_env_override_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -30,6 +35,12 @@ def test_env_override_inference_backend(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("BAODOU_INFERENCE", "http")
     cfg = load_config()
     assert cfg.inference.backend == "http"
+
+
+def test_env_override_capture_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BAODOU_CAPTURE", "mock")
+    cfg = load_config()
+    assert cfg.capture.backend == "mock"
 
 
 def test_missing_config_raises(tmp_path: Path) -> None:
@@ -46,7 +57,6 @@ def test_invalid_yaml_raises(tmp_path: Path) -> None:
 
 
 def test_custom_config_merge(tmp_path: Path) -> None:
-    # Minimal override file based on defaults structure.
     data = {
         "schema_version": "1.0.0",
         "app": {"log_level": "WARNING", "log_json": False, "log_dir": ""},
@@ -64,7 +74,7 @@ def test_custom_config_merge(tmp_path: Path) -> None:
     }
     path = tmp_path / "cfg.yaml"
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
-    # project_root resolution uses core.PROJECT_ROOT for relative model paths.
     cfg = load_config(path)
     assert cfg.app.log_level == "WARNING"
     assert cfg.inference.port == 9999
+    assert cfg.capture.backend == "mock"

@@ -1,0 +1,183 @@
+{
+  "monitors": [
+    {
+      "index": 1,
+      "left": 0,
+      "top": 0,
+      "width": 1920,
+      "height": 1080,
+      "is_primary": true,
+      "name": "Generic PnP Monitor",
+      "dpi_x": 96,
+      "dpi_y": 96,
+      "dpi_scale": 1.0,
+      "orientation": "0"
+    },
+    {
+      "index": 2,
+      "left": 1920,
+      "top": 0,
+      "width": 1920,
+      "height": 1080,
+      "is_primary": false,
+      "name": "Generic PnP Monitor",
+      "dpi_x": 96,
+      "dpi_y": 96,
+      "dpi_scale": 1.0,
+      "orientation": "0"
+    }
+  ],
+  "virtual_desktop": {
+    "index": 0,
+    "left": 0,
+    "top": 0,
+    "width": 3840,
+    "height": 1080,
+    "is_primary": false,
+    "name": "virtual-all",
+    "dpi_x": 96,
+    "dpi_y": 96,
+    "dpi_scale": 1.0,
+    "orientation": "0"
+  },
+  "cursor": {
+    "x": 1649,
+    "y": 1075
+  },
+  "oneshot": {
+    "primary": {
+      "frame_id": "frame-0c7d81aa5800",
+      "trace_id": "",
+      "frame_kind": "vision",
+      "width": 1280,
+      "height": 720,
+      "physical_width": 1920,
+      "physical_height": 1080,
+      "origin_x": 0,
+      "origin_y": 0,
+      "dpi_scale": 1.0,
+      "scale_x": 1.5,
+      "scale_y": 1.5,
+      "monitor_index": 1,
+      "mode": "primary",
+      "capture_ms": 26.085000001330627,
+      "preprocess_ms": 11.936999999306863,
+      "changed": true,
+      "change_score": 1.0,
+      "image_bytes": 386187,
+      "has_image": true,
+      "masked_count": 0,
+      "window_title": null,
+      "wall_ms": 208.6176999982854,
+      "center_screen": {
+        "x": 960,
+        "y": 540
+      },
+      "path": "D:\\Projects\\baodou\\benchmarks\\phase_c\\artifacts\\shot_primary.png"
+    },
+    "all": {
+      "frame_id": "frame-991f9c8136cb",
+      "trace_id": "",
+      "frame_kind": "vision",
+      "width": 1280,
+      "height": 360,
+      "physical_width": 3840,
+      "physical_height": 1080,
+      "origin_x": 0,
+      "origin_y": 0,
+      "dpi_scale": 1.0,
+      "scale_x": 3.0,
+      "scale_y": 3.0,
+      "monitor_index": 0,
+      "mode": "all",
+      "capture_ms": 41.59769999751006,
+      "preprocess_ms": 13.853200001904042,
+      "changed": true,
+      "change_score": 1.0,
+      "image_bytes": 523815,
+      "has_image": true,
+      "masked_count": 0,
+      "window_title": null,
+      "wall_ms": 207.13850000174716,
+      "center_screen": {
+        "x": 1920,
+        "y": 540
+      },
+      "path": "D:\\Projects\\baodou\\benchmarks\\phase_c\\artifacts\\shot_all.png"
+    }
+  },
+  "stream": {
+    "duration_sec": 2.0,
+    "consumed": 32,
+    "model_got": true,
+    "stats": {
+      "ticks": 25,
+      "captures": 25,
+      "errors": 0,
+      "uptime_sec": 2.311999999998079,
+      "streams": {
+        "preview": {
+          "name": "preview",
+          "size": 1,
+          "maxsize": 3,
+          "enqueued": 22,
+          "dequeued": 21,
+          "dropped": 0,
+          "high_watermark": 1,
+          "last_drop_reason": "",
+          "drop_policy": "newest",
+          "emitted": 22,
+          "skipped_unchanged": 0,
+          "skipped_rate": 3,
+          "fps_cfg": 12
+        },
+        "vision": {
+          "name": "vision",
+          "size": 2,
+          "maxsize": 3,
+          "enqueued": 13,
+          "dequeued": 11,
+          "dropped": 0,
+          "high_watermark": 2,
+          "last_drop_reason": "",
+          "drop_policy": "newest",
+          "emitted": 13,
+          "skipped_unchanged": 0,
+          "skipped_rate": 13,
+          "fps_cfg": 8
+        },
+        "model": {
+          "name": "model",
+          "size": 0,
+          "maxsize": 3,
+          "enqueued": 1,
+          "dequeued": 1,
+          "dropped": 0,
+          "high_watermark": 1,
+          "last_drop_reason": "",
+          "drop_policy": "newest",
+          "emitted": 1,
+          "skipped_unchanged": 0,
+          "skipped_rate": 0,
+          "fps_cfg": 0.0
+        },
+        "verify": {
+          "name": "verify",
+          "size": 0,
+          "maxsize": 3,
+          "enqueued": 0,
+          "dequeued": 0,
+          "dropped": 0,
+          "high_watermark": 0,
+          "last_drop_reason": "",
+          "drop_policy": "newest",
+          "emitted": 0,
+          "skipped_unchanged": 0,
+          "skipped_rate": 0,
+          "fps_cfg": 0.0
+        }
+      }
+    },
+    "queues_bounded": true
+  }
+}

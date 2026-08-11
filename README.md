@@ -10,10 +10,11 @@ UI 识别与模型解耦：识别提供 `element_id` + bbox，模型负责语义
 | 阶段 | 状态 |
 |---|---|
 | A 可行性 / 基线 | ✅ 完成（见 `docs/feasibility.md`） |
-| **B 项目骨架** | ✅ 本目录结构、协议、配置、日志、mock 链路 |
-| C+ 采集与后续 | ⏳ 未开始 |
+| B 项目骨架 | ✅ 协议、配置、日志、mock 链路 |
+| **C 屏幕采集** | ✅ mss 多模式采集、坐标、有界队列、四类帧流 |
+| D+ UI 识别与后续 | ⏳ 未开始 |
 
-## 快速开始（阶段 B，纯 mock）
+## 快速开始
 
 ```bat
 cd /d D:\Projects\baodou
@@ -21,9 +22,11 @@ conda activate dev
 python -m pip install -e ".[dev]"
 pytest
 python -m frontend.cli demo --goal "点击搜索按钮"
+python -m frontend.cli capture once --mode primary
+python -m frontend.cli capture stream --seconds 2
 ```
 
-更多命令见 [`docs/setup.md`](docs/setup.md)。
+更多：[`docs/setup.md`](docs/setup.md) · [`docs/capture.md`](docs/capture.md)
 
 ## 模块
 

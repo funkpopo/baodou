@@ -86,6 +86,23 @@ class CaptureMode(StrEnum):
     REGION = "region"
 
 
+class FrameKind(StrEnum):
+    """Downstream use of a frame — frequency/quality differ per kind."""
+
+    RAW = "raw"
+    PREVIEW = "preview"
+    VISION = "vision"
+    MODEL = "model"
+    VERIFY = "verify"
+
+
+class DisplayOrientation(StrEnum):
+    ROT0 = "0"
+    ROT90 = "90"
+    ROT180 = "180"
+    ROT270 = "270"
+
+
 # ---------------------------------------------------------------------------
 # Geometry
 # ---------------------------------------------------------------------------
@@ -112,10 +129,66 @@ class BBox(BaseModel):
     def contains(self, px: int, py: int) -> bool:
         return self.x <= px < self.x + self.width and self.y <= py < self.y + self.height
 
+    def clamp(self, bounds: BBox) -> BBox:
+        x1 = max(self.x, bounds.x)
+        y1 = max(self.y, bounds.y)
+        x2 = min(self.x + self.width, bounds.x + bounds.width)
+        y2 = min(self.y + self.height, bounds.y + bounds.height)
+        return BBox(x=x1, y=y1, width=max(0, x2 - x1), height=max(0, y2 - y1))
+
 
 class Point(BaseModel):
     x: int
     y: int
+
+
+class MonitorInfo(BaseModel):
+    """One physical (or virtual-all) display in virtual-desktop physical pixels."""
+
+    index: int
+    left: int
+    top: int
+    width: int
+    height: int
+    is_primary: bool = False
+    name: str = ""
+    dpi_x: int = 96
+    dpi_y: int = 96
+    dpi_scale: float = 1.0
+    orientation: DisplayOrientation = DisplayOrientation.ROT0
+
+    @property
+    def bbox(self) -> BBox:
+        return BBox(x=self.left, y=self.top, width=self.width, height=self.height)
+
+
+class WindowInfo(BaseModel):
+    hwnd: int | None = None
+    title: str = ""
+    class_name: str = ""
+    left: int = 0
+    top: int = 0
+    width: int = 0
+    height: int = 0
+    visible: bool = True
+
+    @property
+    def bbox(self) -> BBox:
+        return BBox(x=self.left, y=self.top, width=self.width, height=self.height)
+
+
+class SensitiveRegion(BaseModel):
+    """Region to mask before leaving the capture layer (physical screen pixels)."""
+
+    x: int
+    y: int
+    width: int
+    height: int
+    reason: str = "manual"  # manual | password | privacy_window
+    absolute: bool = True
+
+    def as_bbox(self) -> BBox:
+        return BBox(x=self.x, y=self.y, width=self.width, height=self.height)
 
 
 # ---------------------------------------------------------------------------
@@ -131,29 +204,83 @@ class ScreenFrame(BaseModel):
     trace_id: str = ""
     timestamp: datetime = Field(default_factory=_utcnow)
     mode: CaptureMode = CaptureMode.PRIMARY
+    frame_kind: FrameKind = FrameKind.RAW
     monitor_index: int = 0
+    # Stored image size (after scale / ROI).
     width: int
     height: int
+    # Source capture region in virtual-desktop physical pixels.
+    origin_x: int = 0
+    origin_y: int = 0
+    physical_width: int | None = None
+    physical_height: int | None = None
+    # Logical (DIP) size of the source region.
+    logical_width: float | None = None
+    logical_height: float | None = None
     dpi_scale: float = 1.0
+    dpi_x: int = 96
+    dpi_y: int = 96
+    orientation: DisplayOrientation = DisplayOrientation.ROT0
+    # Map stored image pixel → physical screen pixel: phys = origin + img * scale
+    scale_x: float = 1.0
+    scale_y: float = 1.0
     image_format: str = "png"
+    color_mode: str = "RGB"
     # Optional path or base64; keep out of structured logs by convention.
     image_path: str | None = None
     image_b64: str | None = None
+    image_bytes: int | None = None
     capture_ms: float | None = None
+    preprocess_ms: float | None = None
+    changed: bool | None = None
+    change_score: float | None = None
+    pixel_hash: str | None = None
+    window: WindowInfo | None = None
+    monitor: MonitorInfo | None = None
+    masked_regions: list[SensitiveRegion] = Field(default_factory=list)
     extra: dict[str, Any] = Field(default_factory=dict)
 
     def log_summary(self) -> dict[str, Any]:
         return {
             "frame_id": self.frame_id,
             "trace_id": self.trace_id,
+            "frame_kind": self.frame_kind.value,
             "width": self.width,
             "height": self.height,
+            "physical_width": self.physical_width,
+            "physical_height": self.physical_height,
+            "origin_x": self.origin_x,
+            "origin_y": self.origin_y,
             "dpi_scale": self.dpi_scale,
+            "scale_x": self.scale_x,
+            "scale_y": self.scale_y,
             "monitor_index": self.monitor_index,
             "mode": self.mode.value,
             "capture_ms": self.capture_ms,
+            "preprocess_ms": self.preprocess_ms,
+            "changed": self.changed,
+            "change_score": self.change_score,
+            "image_bytes": self.image_bytes,
             "has_image": bool(self.image_path or self.image_b64),
+            "masked_count": len(self.masked_regions),
+            "window_title": self.window.title if self.window else None,
         }
+
+    def image_to_screen(self, ix: float, iy: float) -> Point:
+        """Convert coordinates in the stored image to virtual-desktop physical pixels."""
+        return Point(
+            x=int(round(self.origin_x + ix * self.scale_x)),
+            y=int(round(self.origin_y + iy * self.scale_y)),
+        )
+
+    def screen_to_image(self, sx: float, sy: float) -> Point:
+        """Convert virtual-desktop physical pixels to stored-image coordinates."""
+        if self.scale_x == 0 or self.scale_y == 0:
+            return Point(x=0, y=0)
+        return Point(
+            x=int(round((sx - self.origin_x) / self.scale_x)),
+            y=int(round((sy - self.origin_y) / self.scale_y)),
+        )
 
 
 # ---------------------------------------------------------------------------
