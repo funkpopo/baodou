@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { bridge } from "./bridge";
 import type { RuntimeSnapshot, TaskEvent } from "./types";
 import {
@@ -57,9 +57,19 @@ function App() {
   }
 
   const canConfirm = runtime.phase === "awaiting_user";
+  function dragWindow(event: React.PointerEvent<HTMLElement>) {
+    // In a frameless Tauri window, explicitly delegate dragging to the native
+    // shell. Interactive descendants must keep their normal pointer behavior.
+    if (event.button !== 0) return;
+    const target = event.target as HTMLElement;
+    if (target.closest("button, input, textarea, select, a, [data-no-window-drag]")) return;
+    void getCurrentWindow().startDragging().catch((cause) => {
+      console.error("无法拖动窗口", cause);
+    });
+  }
   return (
     <main className="app-shell">
-      <header className="topbar" data-tauri-drag-region>
+      <header className="topbar" onPointerDown={dragWindow}>
         <div className="brand"><div className="brand-mark"><Sparkles size={16} /></div><span>baodou</span><small>DESKTOP</small></div>
         <div className="topbar-center"><span className="traffic-dot" /> {runtime.mode}<span className="slash">/</span><span className="muted">本地运行</span></div>
         <div className="window-tools"><button className="icon-button" title="诊断" onClick={() => setShowDiagnostics(!showDiagnostics)}><Gauge size={16} /></button><button className="icon-button" title="停止" onClick={() => action(bridge.stop)}><CircleStop size={16} /></button><div className="avatar">BD</div></div>
