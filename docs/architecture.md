@@ -10,9 +10,10 @@ React/WebView UI
 Rust desktop runtime
     ├─ capture: xcap primary-monitor frames
     ├─ inference: llama.cpp OpenAI-compatible HTTP endpoint
-    ├─ planning: one-step JSON plan parser
-    ├─ safety: action, risk, keyword and coordinate policy
-    └─ lifecycle: task state, confirmation, pause and stop
+    ├─ intent: dynamic foreground and visible-window resolution
+    ├─ planning: repeated observe-act-verify JSON loop
+    ├─ actions: dynamic app launch, window activation, click, text and keyboard input
+    └─ lifecycle: task state, verification, pause and stop
 ```
 
 `src/` never accesses the model endpoint or system input directly. `src-tauri/` is the sole authority for desktop APIs and Computer Use operations.
@@ -25,23 +26,26 @@ Commands exposed to the WebView:
 
 - `get_runtime`
 - `run_task`
-- `confirm_task`
 - `pause_runtime`
 - `stop_runtime`
 
-The Rust host emits `task-event` records for observation, planning, confirmation, execution, pause, completion and errors. Event payloads use camelCase so the React types mirror the serialized Rust fields.
+The Rust host emits `task-event` records for observation, planning, execution, verification, completion and errors. Event payloads use camelCase so the React types mirror the serialized Rust fields.
 
-## Safety rules
+## Computer Use loop
 
-The Rust runtime treats all screen text and model output as untrusted. A planned action must:
+Each task runs for at most 12 rounds:
 
-1. be in the action whitelist;
-2. have `low` risk;
-3. avoid protected keywords and applications;
-4. include coordinates when the action requires them;
-5. wait for user confirmation.
+1. capture the latest primary-monitor frame;
+2. enumerate the current foreground window and visible window titles;
+3. ask the model to infer the target window from user intent and live inventory;
+4. execute one supported action when more work is needed;
+5. wait briefly and capture a new frame for verification.
 
-The current MVP keeps native input injection disabled until the Rust UI Automation target-reidentification subsystem is implemented. Confirming a preview therefore never sends keyboard or mouse input.
+Click coordinates returned against the resized model image are mapped back to the physical display before input injection. A stop request is checked before every observation and again immediately before every action.
+
+The runtime has no built-in application alias table. If the main planner omits an action, a separate intent-resolution request may select only a title present in the current window inventory. Invented or stale titles are rejected.
+
+If no visible window matches but the goal clearly names an application, the intent resolver may return an `open_app` query. The executor opens Windows Search, enters that model-derived query, launches the result, and returns to the observation loop. Before non-window actions, the runtime compares the foreground window with the one captured during planning; a user focus change cancels that action and triggers a fresh observation. `Ctrl+Alt+Esc` is monitored natively as an emergency stop even when baodou is not focused.
 
 ## Model endpoint
 

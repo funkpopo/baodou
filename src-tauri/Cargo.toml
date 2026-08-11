@@ -21,6 +21,8 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 xcap = "0.9.8"
+enigo = "0.2.1"
+windows = { version = "0.56", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

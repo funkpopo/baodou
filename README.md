@@ -14,7 +14,7 @@ src-tauri/           Rust 桌面宿主与 Computer Use runtime
   ├─ image/base64    图像转换
   ├─ reqwest         llama-server 客户端
   ├─ serde           结构化计划协议
-  └─ safety policy   风险、动作、坐标和确认门控
+  └─ action loop     观察、决策、窗口激活、输入与结果验证
 model/               本地模型说明与元数据（模型权重不提交）
 docs/                架构、开发与运行文档
 ```
@@ -29,7 +29,9 @@ npm install
 npm run tauri:dev
 ```
 
-默认使用 `native preview + dry-run`：Rust 会采集主屏幕并生成低风险只读计划，但不会注入鼠标或键盘输入。
+默认使用 `native computer use`：Rust 会反复采集主屏幕和动态窗口清单，由模型根据用户意图选择真实目标窗口；每轮生成并执行一个动作，再从新截图验证结果，直到目标完成或达到 12 步上限。
+
+如果目标应用尚未显示，模型可以生成通用 `open_app` 动作，通过 Windows Search 启动应用。任务运行期间 Windows 前台会被 Computer Use 接管；可在任意应用中按 `Ctrl+Alt+Esc` 紧急中止。若用户主动切换前台窗口，待执行动作会被取消并重新规划。
 
 ## 本地模型模式
 
@@ -40,7 +42,7 @@ $env:BAODOU_LLAMA_URL = "http://<host>:8765/v1/chat/completions"
 npm run tauri:dev
 ```
 
-应用会使用 Rust `reqwest` 直接发送屏幕 PNG 给 llama-server，要求模型返回一个结构化、可确认的单步计划。高风险、非白名单和不完整坐标的动作会在 Rust 安全策略中暂停。
+应用会使用 Rust `reqwest` 直接发送屏幕 PNG 给 llama-server，每轮要求模型返回一个结构化动作或确认目标已经完成。动作可以先通过窗口标题激活其它 Windows 应用，再执行鼠标点击、文本输入或按键操作。baodou 本身会继续运行，任务状态和日志不会因目标窗口切换而丢失。
 
 ## 构建安装包
 
