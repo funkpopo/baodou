@@ -161,6 +161,7 @@ actuator:
   verify_require_change: false
   bound_check: true
 safety:
+  # Phase G: risk / permission / privacy
   default_mode: read_only  # read_only | confirm_all | allow_low
   require_confirmation_below: medium  # low | medium | high
   block_high_risk: true
@@ -173,7 +174,63 @@ safety:
     - 转账
     - password
     - 密码
+    - send
+    - 发送
+    - publish
+    - 发布
+    - install
+    - 安装
+    - uninstall
+    - 卸载
+    - sudo
+    - 权限
+    - bank
+    - 银行
+    - 信用卡
+    - 身份证
+  action_whitelist:
+    - none
+    - click
+    - double_click
+    - right_click
+    - move
+    - drag
+    - scroll
+    - type
+    - key
+    - hotkey
+    - wait
+    - reidentify
+  app_allowlist: []           # empty = all apps not in denylist
+  app_denylist:
+    - Taskmgr
+    - regedit
+    - cmd.exe
+    - powershell
+  window_title_allowlist: []
+  window_title_denylist:
+    - 密码
+    - Password
+    - Credential
+    - 银行
+    - Bank
+    - UAC
+  domain_allowlist: []
+  domain_denylist: []
+  max_actions_per_minute: 30
+  max_consecutive_actions: 12
+  max_task_duration_sec: 300
+  max_mouse_move_px: 5000
+  emergency_stop_enabled: true
+  pause_on_focus_loss: false
   audit_enabled: true
+  audit_dir: logs/audit
+  persist_frames: false
+  persist_ocr: false
+  persist_model_context: false
+  redact_pii: true
+  block_prompt_injection: true
+  ignore_screen_instructions: true
 
 frontend:
   mode: cli

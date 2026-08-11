@@ -19,7 +19,7 @@ from capture.base import CaptureBackend
 from capture.factory import create_capture
 from core.cancel import CancellationToken, get_global_token
 from core.config import AppConfig
-from core.errors import ActuatorError, BaodouError, CancelledError, ErrorCode
+from core.errors import ActuatorError, BaodouError, CancelledError, ErrorCode, SafetyError
 from core.logging import get_logger, log_event, new_trace_id, trace_scope
 from core.models import (
     ActionPlan,
@@ -27,6 +27,7 @@ from core.models import (
     ActionResult,
     ActionStep,
     ActionType,
+    AuditEventKind,
     FrameKind,
     PipelineEvent,
     PipelineEventKind,
@@ -43,7 +44,12 @@ from core.models import (
     VerificationResult,
 )
 from inference.base import InferenceBackend
+from safety.audit import AuditLog
+from safety.control import SafetyControl, get_safety_control
+from safety.limits import SafetyLimits
 from safety.policy import SafetyPolicy
+from safety.redact import redact_text
+from safety.threats import ThreatReport
 from ui_vision.base import UIVisionBackend
 from ui_vision.factory import create_ui_vision
 
@@ -73,6 +79,8 @@ class TaskRunResult:
     actions: list[ActionResult] = field(default_factory=list)
     verifications: list[VerificationResult] = field(default_factory=list)
     events: list[PipelineEvent] = field(default_factory=list)
+    threat_report: dict[str, Any] | None = None
+    audit_ids: list[str] = field(default_factory=list)
     error: BaodouError | None = None
     ok: bool = False
     elapsed_ms: float = 0.0
@@ -92,6 +100,8 @@ class TaskRunResult:
             "actions": [a.log_summary() for a in self.actions],
             "verifications": [v.log_summary() for v in self.verifications],
             "step_records": [r.model_dump(mode="json") for r in self.task.step_records],
+            "threat_report": self.threat_report,
+            "audit_ids": self.audit_ids,
             "error": self.error.to_dict() if self.error else None,
             "events": [e.model_dump(mode="json") for e in self.events],
         }
@@ -112,6 +122,9 @@ class TaskAgent:
         actuator: ActuatorBackend | None = None,
         safety: SafetyPolicy | None = None,
         confirm_callback: ConfirmCallback | None = None,
+        control: SafetyControl | None = None,
+        limits: SafetyLimits | None = None,
+        audit: AuditLog | None = None,
     ) -> None:
         self.config = config
         self.token = token or get_global_token()
@@ -126,7 +139,22 @@ class TaskAgent:
         self.actuator = actuator or create_actuator(config)
         self.safety = safety or SafetyPolicy(config)
         self.confirm_callback = confirm_callback
+        self.control = control or get_safety_control()
+        # Sync control flags from config each agent construction
+        self.control.emergency_stop_enabled = config.safety.emergency_stop_enabled
+        self.control.pause_on_focus_loss = config.safety.pause_on_focus_loss
+        self.limits = limits or SafetyLimits(config.safety)
+        self.audit = audit or AuditLog(config)
         self._owns_backends = capture is None  # close only if we created them loosely
+        self._model_version = ""
+        self._prompt_version = ""
+        try:
+            self._model_version = str(getattr(config.inference, "llama_build", "") or "")
+            from inference.prompts import PROMPT_VERSION
+
+            self._prompt_version = str(PROMPT_VERSION)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------ helpers
     def _emit(
@@ -209,12 +237,14 @@ class TaskAgent:
     def _should_auto_confirm(self, step: ActionStep, decision: SafetyDecision) -> bool:
         if not decision.requires_confirmation:
             return True
+        if decision.auto_executable:
+            return True
         if not self.config.agent.auto_confirm:
             return False
-        # Never auto-confirm high risk or blocked
-        if decision.risk == RiskLevel.HIGH:
+        # Never auto-confirm medium+ or high risk (Phase G)
+        if decision.risk in (RiskLevel.MEDIUM, RiskLevel.HIGH):
             return False
-        return step.risk != RiskLevel.HIGH
+        return step.risk not in (RiskLevel.MEDIUM, RiskLevel.HIGH)
 
     def _confirm(
         self,
@@ -228,6 +258,45 @@ class TaskAgent:
             return bool(self.confirm_callback(preview, step, decision))
         # No callback and not auto → pause path (caller handles)
         return False
+
+    def _audit(
+        self,
+        result: TaskRunResult,
+        kind: AuditEventKind,
+        summary: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        rec = self.audit.record(
+            kind,
+            trace_id=result.trace_id,
+            task_id=result.task.task_id,
+            summary=summary,
+            payload=payload or {},
+            model_version=self._model_version,
+            prompt_version=self._prompt_version,
+        )
+        result.audit_ids.append(rec.audit_id)
+
+    def _screen_texts(
+        self, vision: UIVisionResult | None, observation: ScreenObservation | None
+    ) -> list[str]:
+        texts: list[str] = []
+        if vision is not None:
+            for el in vision.elements[:48]:
+                if el.text:
+                    texts.append(el.text)
+        if observation is not None:
+            if observation.observation:
+                texts.append(observation.observation)
+            if observation.notes:
+                texts.append(observation.notes)
+        return texts
+
+    def _check_control(self) -> None:
+        """Emergency stop / pause / optional focus-loss."""
+        if self.config.safety.pause_on_focus_loss:
+            self.control.poll_focus_loss()
+        self.control.check()
 
     # ------------------------------------------------------------------ public API
     def preview(self, user_goal: str, *, trace_id: str | None = None) -> TaskRunResult:
@@ -258,8 +327,22 @@ class TaskAgent:
 
         with trace_scope(tid):
             try:
+                self.limits.reset_task()
                 self.token.check()
+                self._check_control()
                 self._set_state(task, TaskState.OBSERVING)
+                self._audit(
+                    result,
+                    AuditEventKind.TASK_START,
+                    summary=f"goal={user_goal[:120]}",
+                    payload={
+                        "user_goal": redact_text(
+                            user_goal, enabled=self.config.safety.redact_pii
+                        ),
+                        "mode": self.config.safety.default_mode,
+                        "dry_run": self.config.actuator.dry_run,
+                    },
+                )
 
                 # 1. Capture (model frame for planning)
                 frame, image = self._capture_frame(kind=FrameKind.MODEL, trace_id=tid, force=True)
@@ -267,6 +350,7 @@ class TaskAgent:
                 task.frame_id = frame.frame_id
                 self._emit(result, PipelineEventKind.FRAME, frame.log_summary())
                 self.token.check()
+                self._check_control()
 
                 # 2. UI vision
                 vision = self._recognize(frame, trace_id=tid, image=image, goal=user_goal)
@@ -318,9 +402,35 @@ class TaskAgent:
                 )
                 if len(plan.steps) > max_steps:
                     plan.steps = plan.steps[:max_steps]
+                # Redact type-step secrets before they hit logs / audit
+                if self.config.safety.redact_pii:
+                    for s in plan.steps:
+                        if s.text:
+                            s.text = redact_text(s.text, enabled=True)
                 result.plan = plan
                 task.plan_id = plan.plan_id
                 self._emit(result, PipelineEventKind.PLAN, plan.log_summary())
+                self._audit(
+                    result,
+                    AuditEventKind.PLAN,
+                    summary=f"steps={len(plan.steps)} risk_max={plan.risk_max.value}",
+                    payload=plan.log_summary(),
+                )
+
+                # Plan-level threat scan (screen text untrusted)
+                screen_texts = self._screen_texts(vision, observation)
+                threat_report: ThreatReport = self.safety.evaluate_plan_threats(
+                    plan, screen_texts=screen_texts
+                )
+                result.threat_report = threat_report.log_summary()
+                if threat_report.findings:
+                    self._audit(
+                        result,
+                        AuditEventKind.THREAT,
+                        summary=f"findings={len(threat_report.findings)} blocked={threat_report.blocked}",
+                        payload=threat_report.log_summary(),
+                    )
+                    log_event(_log, "agent.threats", **threat_report.log_summary())
 
                 # Previews for all steps
                 previews = build_plan_previews(plan, vision)
@@ -334,6 +444,7 @@ class TaskAgent:
                     self._emit(
                         result, PipelineEventKind.DONE, {"reason": "no_steps", **task.log_summary()}
                     )
+                    self._audit(result, AuditEventKind.TASK_END, summary="completed:no_steps")
                     return result
 
                 if not execute:
@@ -344,10 +455,44 @@ class TaskAgent:
                         {"reason": "preview_only", "step_count": len(plan.steps)},
                     )
                     result.ok = True
+                    self._audit(result, AuditEventKind.TASK_END, summary="preview_only")
                     return result
 
                 # 5. Execute steps with confirm / relocate / verify / recovery
-                self._run_steps(result, plan, vision, frame)
+                self._run_steps(
+                    result,
+                    plan,
+                    vision,
+                    frame,
+                    threat_report=threat_report,
+                    screen_texts=screen_texts,
+                )
+            except SafetyError as exc:
+                if not is_terminal(task.state):
+                    try:
+                        self._set_state(
+                            task,
+                            TaskState.PAUSED
+                            if exc.code
+                            in {
+                                ErrorCode.CONFIRMATION_REQUIRED,
+                                ErrorCode.CANCELLED,
+                            }
+                            else TaskState.FAILED,
+                        )
+                    except BaodouError:
+                        task.touch(TaskState.FAILED)
+                result.error = exc
+                task.last_error = exc.message
+                self._emit(result, PipelineEventKind.ERROR, exc.to_dict(), error=exc)
+                self._audit(
+                    result,
+                    AuditEventKind.PAUSE
+                    if exc.code == ErrorCode.CONFIRMATION_REQUIRED
+                    else AuditEventKind.EMERGENCY_STOP,
+                    summary=exc.message,
+                    payload=exc.to_dict(),
+                )
             except CancelledError as exc:
                 try:
                     self._set_state(task, TaskState.CANCELLED)
@@ -382,6 +527,20 @@ class TaskAgent:
                 self._emit(result, PipelineEventKind.ERROR, err.to_dict(), error=err)
             finally:
                 result.elapsed_ms = (time.perf_counter() - t0) * 1000
+                if result.ok or result.error is not None:
+                    # Avoid duplicate end if already audited in early returns — still fine
+                    with contextlib.suppress(Exception):
+                        self._audit(
+                            result,
+                            AuditEventKind.TASK_END,
+                            summary=f"ok={result.ok} state={task.state.value}",
+                            payload={
+                                "ok": result.ok,
+                                "state": task.state.value,
+                                "elapsed_ms": round(result.elapsed_ms, 2),
+                                "limits": self.limits.snapshot(),
+                            },
+                        )
                 log_event(
                     _log,
                     "agent.finished",
@@ -429,6 +588,9 @@ class TaskAgent:
         plan: ActionPlan,
         vision: UIVisionResult,
         frame: ScreenFrame,
+        *,
+        threat_report: ThreatReport | None = None,
+        screen_texts: list[str] | None = None,
     ) -> None:
         task = result.task
         tid = result.trace_id
@@ -438,6 +600,7 @@ class TaskAgent:
         i = 0
         while i < len(plan.steps):
             self.token.check()
+            self._check_control()
             step = plan.steps[i]
             task.step_index = i
             record = StepRecord(
@@ -464,14 +627,27 @@ class TaskAgent:
             if preview.uses_coordinates and self.config.agent.coordinate_requires_confirm:
                 step.requires_confirmation = True
 
-            # --- Safety ---
-            decision = self.safety.evaluate(step, plan)
+            # --- Safety (Phase G full gate) ---
+            decision = self.safety.evaluate(
+                step,
+                plan,
+                frame=current_frame,
+                vision=current_vision,
+                screen_texts=screen_texts,
+                threat_report=threat_report,
+            )
             record.safety = decision
             result.safety_decisions.append(decision)
             self._emit(
                 result,
                 PipelineEventKind.SAFETY,
                 {**decision.log_summary(), "step_id": step.step_id},
+            )
+            self._audit(
+                result,
+                AuditEventKind.SAFETY,
+                summary=decision.reason,
+                payload={**decision.log_summary(), "step_id": step.step_id},
             )
 
             if not decision.allowed:
@@ -482,6 +658,7 @@ class TaskAgent:
                 err = BaodouError(
                     ErrorCode.RISK_BLOCKED if decision.blocked_by else ErrorCode.PERMISSION_DENIED,
                     decision.reason,
+                    details={"blocked_by": decision.blocked_by, "rules": decision.rules_hit},
                 )
                 result.error = err
                 self._set_state(task, TaskState.FAILED)
@@ -494,8 +671,19 @@ class TaskAgent:
                 self._set_state(task, TaskState.AWAITING_CONFIRMATION)
                 ok_confirm = self._confirm(preview, step, decision)
                 if ok_confirm:
-                    task.auto_confirmed = self.config.agent.auto_confirm
+                    task.auto_confirmed = self.config.agent.auto_confirm or decision.auto_executable
                     task.confirmed = True  # session-level for remaining low-risk if auto
+                    decision.confirmed_by_user = not task.auto_confirmed
+                    self._audit(
+                        result,
+                        AuditEventKind.CONFIRM,
+                        summary=f"confirmed step={step.step_id} auto={task.auto_confirmed}",
+                        payload={
+                            "step_id": step.step_id,
+                            "auto": task.auto_confirmed,
+                            "risk": decision.risk.value,
+                        },
+                    )
                     # For non-auto, confirm only this step — reset for next if not auto
                     if not self.config.agent.auto_confirm and self.confirm_callback:
                         task.confirmed = False  # per-step via callback already returned True
@@ -516,11 +704,18 @@ class TaskAgent:
                         details={
                             "preview": preview.log_summary(),
                             "step_id": step.step_id,
+                            "risk": decision.risk.value,
                         },
                     )
                     result.error = err
                     self._set_state(task, TaskState.PAUSED)
                     self._emit(result, PipelineEventKind.ERROR, err.to_dict(), error=err)
+                    self._audit(
+                        result,
+                        AuditEventKind.PAUSE,
+                        summary=task.pause_reason,
+                        payload={"step_id": step.step_id},
+                    )
                     return
             else:
                 record.state = "confirmed"
@@ -582,12 +777,25 @@ class TaskAgent:
 
             # --- Execute ---
             self._set_state(task, TaskState.EXECUTING)
+            self._check_control()
             prior = None
             if step.target_element_id:
                 prior = prior_elements.get(step.target_element_id)
             coord_ok = bool(
                 task.confirmed or self.config.agent.auto_confirm or step.allow_coordinate_fallback
             )
+            # Phase G limits (rate / consecutive / duration / mouse range)
+            try:
+                self.limits.check_pre_action(step, resolved=step.target_point)
+            except SafetyError as exc:
+                record.state = "failed"
+                record.error_code = exc.code.value
+                record.error_message = exc.message
+                task.steps_failed += 1
+                result.error = exc
+                self._set_state(task, TaskState.FAILED)
+                self._emit(result, PipelineEventKind.ERROR, exc.to_dict(), error=exc)
+                return
             try:
                 action = self.actuator.execute(
                     step,
@@ -632,7 +840,14 @@ class TaskAgent:
             record.action_result = action
             record.state = "executed"
             result.actions.append(action)
+            self.limits.record_action(resolved=action.resolved_point)
             self._emit(result, PipelineEventKind.ACTION, action.log_summary())
+            self._audit(
+                result,
+                AuditEventKind.ACTION,
+                summary=action.message or action.action.value,
+                payload=action.log_summary(),
+            )
 
             if action.resolved_element_id and current_vision.by_id(action.resolved_element_id):
                 prior_elements[action.resolved_element_id] = current_vision.by_id(  # type: ignore[assignment]
@@ -690,6 +905,12 @@ class TaskAgent:
             record.verification = verification
             result.verifications.append(verification)
             self._emit(result, PipelineEventKind.VERIFICATION, verification.log_summary())
+            self._audit(
+                result,
+                AuditEventKind.VERIFY,
+                summary=verification.message or ("pass" if verification.passed else "fail"),
+                payload=verification.log_summary(),
+            )
 
             current_frame = after_frame
             current_vision = after_vision

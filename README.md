@@ -14,8 +14,9 @@ UI 识别与模型解耦：识别提供 `element_id` + bbox，模型负责语义
 | C 屏幕采集 | ✅ mss 多模式采集、坐标、有界队列、四类帧流 |
 | D UI 识别 | ✅ UIA + rules 融合、多分辨率坐标、紧凑上下文 |
 | E 推理层 | ✅ llama-server 生命周期、结构化校验、降级与 prompt 版本 |
-| **F 任务代理** | ✅ 状态机、预览确认、重定位、验证、失败暂停（默认 dry_run） |
-| G+ 安全与后续 | ⏳ 未开始 |
+| F 任务代理 | ✅ 状态机、预览确认、重定位、验证、失败暂停（默认 dry_run） |
+| **G 安全权限** | ✅ 风险分级、硬拦截、紧急停止、审计脱敏、威胁门控 |
+| H+ UI 与后续 | ⏳ 未开始 |
 
 ## 快速开始
 
@@ -30,9 +31,11 @@ python -m frontend.cli vision once --goal "点击搜索"
 python -m frontend.cli capture stream --seconds 2
 python -m frontend.cli infer once --backend mock --vision-backend mock --goal "描述当前屏幕"
 python -m frontend.cli agent run --goal "点击搜索按钮" --yes --mock
+python -m frontend.cli safety status
+python -m frontend.cli safety check --goal "删除并支付" --action click
 ```
 
-更多：[`docs/setup.md`](docs/setup.md) · [`docs/capture.md`](docs/capture.md) · [`docs/ui_vision.md`](docs/ui_vision.md) · [`docs/inference.md`](docs/inference.md) · [`docs/agent.md`](docs/agent.md)
+更多：[`docs/setup.md`](docs/setup.md) · [`docs/capture.md`](docs/capture.md) · [`docs/ui_vision.md`](docs/ui_vision.md) · [`docs/inference.md`](docs/inference.md) · [`docs/agent.md`](docs/agent.md) · [`docs/safety.md`](docs/safety.md)
 
 ## 模块
 
@@ -43,7 +46,7 @@ python -m frontend.cli agent run --goal "点击搜索按钮" --yes --mock
 | `inference/` | llama-server 客户端 / mock |
 | `agent/` | 任务与计划 |
 | `actuator/` | 结构化动作执行 |
-| `safety/` | 风险、确认、拦截 |
+| `safety/` | 风险、确认、拦截、审计、脱敏、紧急停止 |
 | `frontend/` | CLI |
 | `core/` | 协议、配置、日志、错误、取消 |
 | `tests/` | 自动化测试 |
@@ -60,5 +63,5 @@ python -m frontend.cli agent run --goal "点击搜索按钮" --yes --mock
 ## 安全提示
 
 默认 **不会**向系统注入真实鼠标/键盘事件（`actuator.dry_run: true`）。  
-阶段 F 的 `agent run --yes --mock` 走完整确认/执行/验证链路，仍为 dry-run。  
-高风险关键词默认硬拦截；目标消失时暂停而非盲点。
+默认安全模式 **只读**（`safety.default_mode: read_only`）；高风险关键词硬拦截。  
+`--yes` 仅自动确认低风险，不能绕过权限/白名单/紧急停止。详见 `docs/safety.md`。

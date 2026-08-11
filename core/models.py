@@ -61,9 +61,20 @@ class ActionType(StrEnum):
 
 
 class RiskLevel(StrEnum):
+    """Protocol risk for action steps (model-facing: low|medium|high)."""
+
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+
+
+class RiskCategory(StrEnum):
+    """Phase G operational risk buckets (policy-facing)."""
+
+    OBSERVE = "observe"  # read-only observation, no OS input
+    LOW = "low"  # low-risk interaction (click/move/scroll)
+    MEDIUM = "medium"  # data modification (type/drag)
+    HIGH = "high"  # external submit / irreversible
 
 
 class TaskState(StrEnum):
@@ -705,14 +716,64 @@ class SafetyDecision(BaseModel):
     risk: RiskLevel = RiskLevel.LOW
     reason: str = ""
     blocked_by: str | None = None
+    # Phase G extensions
+    category: RiskCategory = RiskCategory.LOW
+    rules_hit: list[str] = Field(default_factory=list)
+    auto_executable: bool = False
+    confirmed_by_user: bool = False
 
     def log_summary(self) -> dict[str, Any]:
         return {
             "allowed": self.allowed,
             "requires_confirmation": self.requires_confirmation,
             "risk": self.risk.value,
+            "category": self.category.value,
             "reason": self.reason[:120],
             "blocked_by": self.blocked_by,
+            "rules_hit": self.rules_hit[:8],
+            "auto_executable": self.auto_executable,
+        }
+
+
+class AuditEventKind(StrEnum):
+    TASK_START = "task_start"
+    TASK_END = "task_end"
+    OBSERVE = "observe"
+    PLAN = "plan"
+    CONFIRM = "confirm"
+    SAFETY = "safety"
+    ACTION = "action"
+    VERIFY = "verify"
+    PAUSE = "pause"
+    EMERGENCY_STOP = "emergency_stop"
+    REDACT = "redact"
+    CLEANUP = "cleanup"
+    THREAT = "threat"
+
+
+class AuditRecord(BaseModel):
+    """Non-repudiable local audit entry (Phase G). No raw pixels / secrets."""
+
+    protocol_version: str = PROTOCOL_VERSION
+    audit_id: str = Field(default_factory=lambda: _new_id("audit"))
+    kind: AuditEventKind
+    trace_id: str = ""
+    task_id: str = ""
+    timestamp: datetime = Field(default_factory=_utcnow)
+    summary: str = ""
+    # Structured but redacted payload
+    payload: dict[str, Any] = Field(default_factory=dict)
+    model_version: str = ""
+    prompt_version: str = ""
+
+    def log_summary(self) -> dict[str, Any]:
+        return {
+            "audit_id": self.audit_id,
+            "kind": self.kind.value,
+            "trace_id": self.trace_id,
+            "task_id": self.task_id,
+            "summary": self.summary[:160],
+            "model_version": self.model_version,
         }
 
 

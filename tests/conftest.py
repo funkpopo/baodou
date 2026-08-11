@@ -24,6 +24,16 @@ def _reset_cancel_token() -> None:
     tok.reset()
 
 
+@pytest.fixture(autouse=True)
+def _reset_safety_control() -> None:
+    from safety.control import reset_safety_control
+
+    reset_safety_control()
+    yield
+    reset_safety_control()
+    get_global_token().reset()
+
+
 @pytest.fixture
 def config():
     setup_logging(level="WARNING", json_logs=False, log_dir=None)

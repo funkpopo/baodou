@@ -230,11 +230,87 @@ class ActuatorSection(BaseModel):
 
 
 class SafetySection(BaseModel):
+    """Phase G: risk gates, allow/deny lists, limits, audit, privacy."""
+
+    # Modes: read_only (default) | confirm_all | allow_low (auto low-risk only)
     default_mode: Literal["read_only", "confirm_all", "allow_low"] = "read_only"
+    # Confirm when risk >= this level (unless allow_low auto-path)
     require_confirmation_below: Literal["low", "medium", "high"] = "medium"
     block_high_risk: bool = True
-    sensitive_keywords: list[str] = Field(default_factory=list)
+    # Hard block keyword substrings (goal/step/text); elevated to HIGH + blocked
+    sensitive_keywords: list[str] = Field(
+        default_factory=lambda: [
+            "delete",
+            "删除",
+            "payment",
+            "支付",
+            "transfer",
+            "转账",
+            "password",
+            "密码",
+            "send",
+            "发送",
+            "publish",
+            "发布",
+            "install",
+            "安装",
+            "uninstall",
+            "卸载",
+            "sudo",
+            "权限",
+            "bank",
+            "银行",
+            "信用卡",
+            "身份证",
+        ]
+    )
+    # Action types allowed at all (others hard-blocked even if model asks)
+    action_whitelist: list[str] = Field(
+        default_factory=lambda: [
+            "none",
+            "click",
+            "double_click",
+            "right_click",
+            "move",
+            "drag",
+            "scroll",
+            "type",
+            "key",
+            "hotkey",
+            "wait",
+            "reidentify",
+        ]
+    )
+    # Target app / window / domain filters (empty allowlist = permit all not denied)
+    app_allowlist: list[str] = Field(default_factory=list)
+    app_denylist: list[str] = Field(
+        default_factory=lambda: ["Taskmgr", "regedit", "cmd.exe", "powershell"]
+    )
+    window_title_allowlist: list[str] = Field(default_factory=list)
+    window_title_denylist: list[str] = Field(
+        default_factory=lambda: ["密码", "Password", "Credential", "银行", "Bank", "UAC"]
+    )
+    domain_allowlist: list[str] = Field(default_factory=list)
+    domain_denylist: list[str] = Field(default_factory=list)
+    # Rate / scope limits
+    max_actions_per_minute: int = 30
+    max_consecutive_actions: int = 12
+    max_task_duration_sec: float = 300.0
+    max_mouse_move_px: int = 5000
+    # Control plane
+    emergency_stop_enabled: bool = True
+    pause_on_focus_loss: bool = False  # opt-in; needs foreground polling
+    # Audit & persistence (local only)
     audit_enabled: bool = True
+    audit_dir: str = "logs/audit"
+    persist_frames: bool = False
+    persist_ocr: bool = False
+    persist_model_context: bool = False
+    # Privacy redaction before model / logs
+    redact_pii: bool = True
+    # Threat defenses
+    block_prompt_injection: bool = True
+    ignore_screen_instructions: bool = True  # treat OCR/UI text as untrusted data
 
 
 class FrontendSection(BaseModel):
@@ -294,6 +370,8 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         "BAODOU_ACTUATOR": ("actuator", "backend"),
         "BAODOU_DRY_RUN": ("actuator", "dry_run"),
         "BAODOU_AUTO_CONFIRM": ("agent", "auto_confirm"),
+        "BAODOU_SAFETY_MODE": ("safety", "default_mode"),
+        "BAODOU_AUDIT": ("safety", "audit_enabled"),
     }
     for env_key, path in mapping.items():
         raw = os.environ.get(env_key)
@@ -303,7 +381,7 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         bucket = data.setdefault(section, {})
         if key in ("port", "n_ctx", "n_gpu_layers", "monitor_index"):
             bucket[key] = int(raw)
-        elif key in ("dry_run", "auto_confirm"):
+        elif key in ("dry_run", "auto_confirm", "audit_enabled"):
             bucket[key] = raw.strip().lower() in ("1", "true", "yes", "on")
         else:
             bucket[key] = raw

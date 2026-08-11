@@ -1,4 +1,4 @@
-"""CLI entry: config, mock demo, capture (C), UI vision (D), inference (E), agent (F)."""
+"""CLI entry: config, mock demo, capture (C), UI vision (D), inference (E), agent (F), safety (G)."""
 
 from __future__ import annotations
 
@@ -306,6 +306,65 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         dest="ag_log_level",
     )
+
+    # --- Phase G safety ---
+    saf = sub.add_parser("safety", help="Safety / permission / privacy (Phase G)")
+    saf_sub = saf.add_subparsers(dest="safety_cmd", required=True)
+
+    saf_status = saf_sub.add_parser("status", help="Show control plane + safety config summary")
+    saf_status.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="saf_log_level",
+    )
+
+    saf_pause = saf_sub.add_parser("pause", help="Global pause")
+    saf_pause.add_argument("--reason", type=str, default="cli_pause")
+    saf_sub.add_parser("resume", help="Resume from pause")
+    saf_stop = saf_sub.add_parser("stop", help="Emergency stop (cancels global token)")
+    saf_stop.add_argument("--reason", type=str, default="cli_emergency_stop")
+    saf_sub.add_parser("reset", help="Clear emergency stop + cancel token")
+
+    saf_check = saf_sub.add_parser("check", help="Evaluate one synthetic step against policy")
+    saf_check.add_argument("--goal", type=str, required=True)
+    saf_check.add_argument(
+        "--action",
+        type=str,
+        default="click",
+        help="Action type (click|type|hotkey|...)",
+    )
+    saf_check.add_argument("--text", type=str, default="")
+    saf_check.add_argument("--element-id", type=str, default="btn_ok_01")
+    saf_check.add_argument("--risk", choices=["low", "medium", "high"], default="low")
+    saf_check.add_argument(
+        "--screen-text",
+        type=str,
+        default="",
+        help="Untrusted screen/OCR text to include in threat scan",
+    )
+    saf_check.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="saf_log_level",
+    )
+
+    saf_redact = saf_sub.add_parser("redact", help="Redact PII in sample text")
+    saf_redact.add_argument("--text", type=str, required=True)
+
+    saf_sub.add_parser("threats", help="Print threat model summary")
+
+    saf_audit = saf_sub.add_parser("audit", help="Audit log ops")
+    saf_audit_sub = saf_audit.add_subparsers(dest="audit_cmd", required=True)
+    saf_audit_sub.add_parser("path", help="Show audit directory / today's file")
+    aud_clean = saf_audit_sub.add_parser("cleanup", help="Cleanup audit files")
+    aud_clean.add_argument("--days", type=int, default=None, help="Remove files older than N days")
+    aud_clean.add_argument("--wipe", action="store_true", help="Wipe all audit files")
+    saf_audit_sub.add_parser("disable", help="Disable audit file persistence (runtime)")
+
     return p
 
 
@@ -1068,6 +1127,156 @@ def cmd_agent_states(config_path: str | None, log_level: str | None) -> int:
     return 0
 
 
+def cmd_safety_status(config_path: str | None, log_level: str | None) -> int:
+    cfg = _setup_from_args(config_path, log_level)
+    from safety.control import get_safety_control
+
+    ctrl = get_safety_control()
+    ctrl.emergency_stop_enabled = cfg.safety.emergency_stop_enabled
+    ctrl.pause_on_focus_loss = cfg.safety.pause_on_focus_loss
+    _print_json(
+        {
+            "control": ctrl.status(),
+            "safety": {
+                "default_mode": cfg.safety.default_mode,
+                "block_high_risk": cfg.safety.block_high_risk,
+                "require_confirmation_below": cfg.safety.require_confirmation_below,
+                "audit_enabled": cfg.safety.audit_enabled,
+                "audit_dir": cfg.safety.audit_dir,
+                "redact_pii": cfg.safety.redact_pii,
+                "max_actions_per_minute": cfg.safety.max_actions_per_minute,
+                "max_consecutive_actions": cfg.safety.max_consecutive_actions,
+                "max_task_duration_sec": cfg.safety.max_task_duration_sec,
+                "max_mouse_move_px": cfg.safety.max_mouse_move_px,
+                "action_whitelist": cfg.safety.action_whitelist,
+                "app_denylist": cfg.safety.app_denylist,
+                "window_title_denylist": cfg.safety.window_title_denylist,
+            },
+            "actuator_dry_run": cfg.actuator.dry_run,
+        }
+    )
+    return 0
+
+
+def cmd_safety_control(config_path: str | None, action: str, reason: str = "") -> int:
+    cfg = _setup_from_args(config_path, None)
+    from safety.control import get_safety_control
+
+    ctrl = get_safety_control()
+    ctrl.emergency_stop_enabled = cfg.safety.emergency_stop_enabled
+    if action == "pause":
+        ctrl.request_pause(reason or "cli_pause")
+    elif action == "resume":
+        try:
+            ctrl.request_resume(reason or "cli_resume")
+        except Exception as exc:  # noqa: BLE001
+            _print_json({"ok": False, "error": str(exc), "control": ctrl.status()})
+            return 1
+    elif action == "stop":
+        ctrl.request_stop(reason or "cli_emergency_stop", token=get_global_token())
+    elif action == "reset":
+        ctrl.reset_stop(reason or "cli_reset")
+    else:
+        _print_json({"ok": False, "error": f"unknown action {action}"})
+        return 1
+    _print_json({"ok": True, "action": action, "control": ctrl.status()})
+    return 0
+
+
+def cmd_safety_check(
+    config_path: str | None,
+    *,
+    goal: str,
+    action: str,
+    text: str,
+    element_id: str,
+    risk: str,
+    screen_text: str,
+    log_level: str | None,
+) -> int:
+    cfg = _setup_from_args(config_path, log_level)
+    from core.models import ActionPlan, ActionStep, ActionType, RiskLevel
+    from safety.policy import SafetyPolicy
+    from safety.risk import classify_step
+    from safety.threats import scan_plan
+
+    try:
+        act = ActionType(action)
+    except ValueError:
+        _print_json({"ok": False, "error": f"invalid action: {action}"})
+        return 1
+    step = ActionStep(
+        action=act,
+        target_element_id=element_id or None,
+        text=text or None,
+        risk=RiskLevel(risk),
+        requires_confirmation=True,
+        expected_change="cli safety check",
+    )
+    plan = ActionPlan(goal=goal, steps=[step], risk_max=RiskLevel(risk))
+    screen_texts = [screen_text] if screen_text else []
+    threats = scan_plan(plan, cfg=cfg.safety, screen_texts=screen_texts)
+    cat, elev, rules = classify_step(step, plan=plan, sensitive_keywords=cfg.safety.sensitive_keywords)
+    decision = SafetyPolicy(cfg).evaluate(
+        step, plan, screen_texts=screen_texts, threat_report=threats
+    )
+    _print_json(
+        {
+            "goal": goal,
+            "classification": {
+                "category": cat.value,
+                "risk": elev.value,
+                "rules": rules,
+            },
+            "threats": threats.log_summary(),
+            "decision": decision.log_summary(),
+            "mode": cfg.safety.default_mode,
+        }
+    )
+    return 0 if decision.allowed else 1
+
+
+def cmd_safety_redact(text: str) -> int:
+    from safety.redact import redact_text
+
+    out = redact_text(text, enabled=True)
+    _print_json({"input": text, "redacted": out, "changed": out != text})
+    return 0
+
+
+def cmd_safety_threats() -> int:
+    from safety.threats import THREAT_MODEL
+
+    _print_json({"threat_model": THREAT_MODEL})
+    return 0
+
+
+def cmd_safety_audit(config_path: str | None, audit_cmd: str, *, days: int | None, wipe: bool) -> int:
+    cfg = _setup_from_args(config_path, None)
+    from safety.audit import AuditLog
+
+    audit = AuditLog(cfg)
+    if audit_cmd == "path":
+        _print_json(
+            {
+                "enabled": audit.enabled(),
+                "path": str(audit.path) if audit.path else None,
+                "dir": cfg.safety.audit_dir,
+            }
+        )
+        return 0
+    if audit_cmd == "cleanup":
+        result = audit.cleanup(older_than_days=days, wipe_all=wipe)
+        _print_json({"ok": True, **result})
+        return 0
+    if audit_cmd == "disable":
+        audit.disable_persistence()
+        _print_json({"ok": True, "audit_enabled": False})
+        return 0
+    _print_json({"ok": False, "error": f"unknown audit cmd {audit_cmd}"})
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1164,6 +1373,40 @@ def main(argv: list[str] | None = None) -> int:
                 max_steps=args.max_steps,
                 json_out=args.json_out,
                 log_level=level,
+            )
+    if args.command == "safety":
+        level = getattr(args, "saf_log_level", None) or args.log_level
+        if args.safety_cmd == "status":
+            return cmd_safety_status(args.config, level)
+        if args.safety_cmd == "pause":
+            return cmd_safety_control(args.config, "pause", getattr(args, "reason", ""))
+        if args.safety_cmd == "resume":
+            return cmd_safety_control(args.config, "resume")
+        if args.safety_cmd == "stop":
+            return cmd_safety_control(args.config, "stop", getattr(args, "reason", ""))
+        if args.safety_cmd == "reset":
+            return cmd_safety_control(args.config, "reset")
+        if args.safety_cmd == "check":
+            return cmd_safety_check(
+                args.config,
+                goal=args.goal,
+                action=args.action,
+                text=args.text or "",
+                element_id=args.element_id,
+                risk=args.risk,
+                screen_text=args.screen_text or "",
+                log_level=level,
+            )
+        if args.safety_cmd == "redact":
+            return cmd_safety_redact(args.text)
+        if args.safety_cmd == "threats":
+            return cmd_safety_threats()
+        if args.safety_cmd == "audit":
+            return cmd_safety_audit(
+                args.config,
+                args.audit_cmd,
+                days=getattr(args, "days", None),
+                wipe=bool(getattr(args, "wipe", False)),
             )
     parser.error(f"unknown command {args.command}")
     return 2

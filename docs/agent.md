@@ -79,9 +79,11 @@ python -m frontend.cli agent states
 ## 5. 确认与安全
 
 - 默认 `actuator.dry_run: true`：只走校验/预览/日志，不注入系统输入
-- 默认需要确认；CLI `--yes` 打开 `agent.auto_confirm`（仍拦截高风险）
+- 默认需要确认；CLI `--yes` 打开 `agent.auto_confirm`（仍拦截高风险；**不能**放行 medium+）
+- 阶段 G 完整门控：白名单、denylist、注入扫描、频率/时长限制、紧急停止、本地审计
 - `safety.policy` 高风险关键词硬拦截（删除/支付/转账/密码等）
 - 预览字段：`summary`、目标 bbox/中心点、`expected_impact`、`warnings`
+- 详见 [`docs/safety.md`](safety.md)
 
 ---
 
