@@ -13,8 +13,9 @@ UI 识别与模型解耦：识别提供 `element_id` + bbox，模型负责语义
 | B 项目骨架 | ✅ 协议、配置、日志、mock 链路 |
 | C 屏幕采集 | ✅ mss 多模式采集、坐标、有界队列、四类帧流 |
 | D UI 识别 | ✅ UIA + rules 融合、多分辨率坐标、紧凑上下文 |
-| **E 推理层** | ✅ llama-server 生命周期、结构化校验、降级与 prompt 版本 |
-| F+ 代理与后续 | ⏳ 未开始 |
+| E 推理层 | ✅ llama-server 生命周期、结构化校验、降级与 prompt 版本 |
+| **F 任务代理** | ✅ 状态机、预览确认、重定位、验证、失败暂停（默认 dry_run） |
+| G+ 安全与后续 | ⏳ 未开始 |
 
 ## 快速开始
 
@@ -28,9 +29,10 @@ python -m frontend.cli capture once --mode primary
 python -m frontend.cli vision once --goal "点击搜索"
 python -m frontend.cli capture stream --seconds 2
 python -m frontend.cli infer once --backend mock --vision-backend mock --goal "描述当前屏幕"
+python -m frontend.cli agent run --goal "点击搜索按钮" --yes --mock
 ```
 
-更多：[`docs/setup.md`](docs/setup.md) · [`docs/capture.md`](docs/capture.md) · [`docs/ui_vision.md`](docs/ui_vision.md) · [`docs/inference.md`](docs/inference.md)
+更多：[`docs/setup.md`](docs/setup.md) · [`docs/capture.md`](docs/capture.md) · [`docs/ui_vision.md`](docs/ui_vision.md) · [`docs/inference.md`](docs/inference.md) · [`docs/agent.md`](docs/agent.md)
 
 ## 模块
 
@@ -57,5 +59,6 @@ python -m frontend.cli infer once --backend mock --vision-backend mock --goal "�
 
 ## 安全提示
 
-阶段 B **不会**向系统注入真实鼠标/键盘事件（`actuator.dry_run: true`）。  
-高风险关键词默认硬拦截。
+默认 **不会**向系统注入真实鼠标/键盘事件（`actuator.dry_run: true`）。  
+阶段 F 的 `agent run --yes --mock` 走完整确认/执行/验证链路，仍为 dry-run。  
+高风险关键词默认硬拦截；目标消失时暂停而非盲点。

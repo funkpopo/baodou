@@ -191,13 +191,42 @@ class AgentSection(BaseModel):
     max_steps: int = 8
     default_risk_auto: bool = False
     plan_timeout_sec: float = 30.0
-    backend: Literal["mock"] = "mock"
+    # mock = rule planner; inference = use model plan when available, else mock fallback
+    backend: Literal["mock", "inference"] = "mock"
+    # Auto-confirm low-risk steps (still blocked for high risk). CLI --yes sets true.
+    auto_confirm: bool = False
+    # Re-capture + re-locate element immediately before each action.
+    reidentify_before_action: bool = True
+    max_recovery_attempts: int = 2
+    step_timeout_ms: int = 10000
+    pause_on_target_missing: bool = True
+    pause_on_verify_fail: bool = True
+    prefer_element_id: bool = True
+    # Bare coordinates always need an extra confirmation flag / user yes.
+    coordinate_requires_confirm: bool = True
+    # After action, wait briefly before verify capture.
+    post_action_settle_ms: int = 120
+    # When planning via inference fails, fall back to mock planner.
+    fallback_to_mock_plan: bool = True
 
 
 class ActuatorSection(BaseModel):
-    backend: Literal["mock"] = "mock"
+    # mock = no OS input; win = Windows SendInput (still respects dry_run)
+    backend: Literal["mock", "win"] = "mock"
     dry_run: bool = True
     max_actions_per_minute: int = 30
+    move_duration_ms: int = 40
+    click_delay_ms: int = 30
+    type_interval_ms: int = 15
+    # Relocate match thresholds
+    relocate_iou_min: float = 0.35
+    relocate_require_visible: bool = True
+    relocate_require_enabled: bool = True
+    # Verify: mean abs pixel change sample threshold (0..1-ish)
+    verify_change_threshold: float = 0.008
+    verify_require_change: bool = False  # soft: change helps but not mandatory for dry_run
+    # Fail closed if resolved point is outside virtual desktop
+    bound_check: bool = True
 
 
 class SafetySection(BaseModel):
@@ -261,6 +290,10 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         "BAODOU_N_GPU_LAYERS": ("inference", "n_gpu_layers"),
         "BAODOU_DEVICE": ("inference", "device"),
         "BAODOU_UI_VISION": ("ui_vision", "backend"),
+        "BAODOU_AGENT": ("agent", "backend"),
+        "BAODOU_ACTUATOR": ("actuator", "backend"),
+        "BAODOU_DRY_RUN": ("actuator", "dry_run"),
+        "BAODOU_AUTO_CONFIRM": ("agent", "auto_confirm"),
     }
     for env_key, path in mapping.items():
         raw = os.environ.get(env_key)
@@ -270,6 +303,8 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         bucket = data.setdefault(section, {})
         if key in ("port", "n_ctx", "n_gpu_layers", "monitor_index"):
             bucket[key] = int(raw)
+        elif key in ("dry_run", "auto_confirm"):
+            bucket[key] = raw.strip().lower() in ("1", "true", "yes", "on")
         else:
             bucket[key] = raw
     return data

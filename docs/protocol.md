@@ -62,6 +62,20 @@ SafetyDecision.allowed / requires_confirmation / blocked_by
 
 高风险关键词（配置 `safety.sensitive_keywords`）会抬升为 `high` 并默认硬拦截。
 
+## 任务状态机（阶段 F）
+
+```text
+TaskState:
+  idle → observing → planning → awaiting_confirmation
+       → executing → verifying → completed | failed | paused | cancelled
+```
+
+- `ActionPreview`：用户可见「做什么 / 目标在哪 / 预计影响」
+- `StepRecord`：单步审计（preview → safety → action → verification → recovery）
+- 定位优先 `element_id`；裸坐标需 `allow_coordinate_fallback` + 二次确认
+- 执行前 `reidentify`；失败策略见 `RecoveryAction`（reidentify / skip / pause / fail）
+- 默认 `actuator.dry_run=true`，合法计划也不得绕过确认直接注入系统输入
+
 ## 错误码
 
 见 `core/errors.py` → `ErrorCode`，包括：

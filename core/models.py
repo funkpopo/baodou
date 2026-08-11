@@ -483,13 +483,25 @@ class ActionStep(BaseModel):
     target_element_id: str | None = None
     # Coordinates only as last resort; prefer element_id.
     target_point: Point | None = None
+    # Drag end / secondary point (physical screen pixels).
+    end_point: Point | None = None
     text: str | None = None
     keys: list[str] = Field(default_factory=list)
+    # Scroll deltas (positive dy = scroll up on most Windows apps via wheel).
+    scroll_dx: int = 0
+    scroll_dy: int = 0
+    wait_ms: int = 0
     risk: RiskLevel = RiskLevel.LOW
     requires_confirmation: bool = True
+    # Optional steps may be skipped on recovery instead of failing the task.
+    optional: bool = False
+    # Explicit opt-in for bare coordinates (still needs secondary confirm by policy).
+    allow_coordinate_fallback: bool = False
     preconditions: list[str] = Field(default_factory=list)
     expected_change: str = ""
     timeout_ms: int = 5000
+    # Human-readable label for preview UI.
+    description: str = ""
 
 
 class ActionPlan(BaseModel):
@@ -523,6 +535,10 @@ class ActionResult(BaseModel):
     dry_run: bool = True
     message: str = ""
     latency_ms: float | None = None
+    # Resolved physical click/type point actually used (after relocate).
+    resolved_point: Point | None = None
+    resolved_element_id: str | None = None
+    relocated: bool = False
     timestamp: datetime = Field(default_factory=_utcnow)
 
     def log_summary(self) -> dict[str, Any]:
@@ -534,6 +550,9 @@ class ActionResult(BaseModel):
             "success": self.success,
             "dry_run": self.dry_run,
             "latency_ms": self.latency_ms,
+            "resolved_element_id": self.resolved_element_id,
+            "relocated": self.relocated,
+            "resolved_point": self.resolved_point.model_dump() if self.resolved_point else None,
         }
 
 
@@ -546,6 +565,11 @@ class VerificationResult(BaseModel):
     expected: str = ""
     actual: str = ""
     message: str = ""
+    # Optional signals used by agent recovery.
+    change_score: float | None = None
+    target_still_present: bool | None = None
+    frame_id_before: str | None = None
+    frame_id_after: str | None = None
     timestamp: datetime = Field(default_factory=_utcnow)
 
     def log_summary(self) -> dict[str, Any]:
@@ -555,7 +579,73 @@ class VerificationResult(BaseModel):
             "step_id": self.step_id,
             "passed": self.passed,
             "message": self.message[:120],
+            "change_score": self.change_score,
+            "target_still_present": self.target_still_present,
         }
+
+
+class ActionPreview(BaseModel):
+    """User-visible preview: what will run, where, and expected impact."""
+
+    protocol_version: str = PROTOCOL_VERSION
+    preview_id: str = Field(default_factory=lambda: _new_id("prev"))
+    step_id: str
+    action: ActionType
+    summary: str
+    target_element_id: str | None = None
+    target_text: str = ""
+    target_type: str = ""
+    target_bbox: BBox | None = None
+    target_point: Point | None = None
+    risk: RiskLevel = RiskLevel.LOW
+    requires_confirmation: bool = True
+    expected_impact: str = ""
+    preconditions: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    uses_coordinates: bool = False
+
+    def log_summary(self) -> dict[str, Any]:
+        return {
+            "preview_id": self.preview_id,
+            "step_id": self.step_id,
+            "action": self.action.value,
+            "summary": self.summary[:120],
+            "target_element_id": self.target_element_id,
+            "risk": self.risk.value,
+            "requires_confirmation": self.requires_confirmation,
+            "uses_coordinates": self.uses_coordinates,
+            "warnings": self.warnings[:5],
+        }
+
+
+class RecoveryAction(StrEnum):
+    NONE = "none"
+    REIDENTIFY = "reidentify"
+    RETRY_STEP = "retry_step"
+    SKIP_STEP = "skip_step"
+    GO_BACK = "go_back"
+    PAUSE = "pause"
+    FAIL = "fail"
+
+
+class StepRecord(BaseModel):
+    """One executed (or attempted) step with full audit trail."""
+
+    protocol_version: str = PROTOCOL_VERSION
+    step_id: str
+    index: int
+    action: ActionType
+    state: str = "pending"  # pending|preview|confirmed|executed|verified|skipped|failed|paused
+    preview: ActionPreview | None = None
+    safety: SafetyDecision | None = None
+    action_result: ActionResult | None = None
+    verification: VerificationResult | None = None
+    recovery: RecoveryAction = RecoveryAction.NONE
+    recovery_note: str = ""
+    frame_id_before: str | None = None
+    frame_id_after: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
 
 
 class TaskContext(BaseModel):
@@ -566,6 +656,16 @@ class TaskContext(BaseModel):
     state: TaskState = TaskState.IDLE
     frame_id: str | None = None
     plan_id: str | None = None
+    step_index: int = 0
+    steps_done: int = 0
+    steps_skipped: int = 0
+    steps_failed: int = 0
+    recovery_attempts: int = 0
+    pause_reason: str = ""
+    last_error: str = ""
+    confirmed: bool = False
+    auto_confirmed: bool = False
+    step_records: list[StepRecord] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -573,6 +673,24 @@ class TaskContext(BaseModel):
         if state is not None:
             self.state = state
         self.updated_at = _utcnow()
+
+    def log_summary(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "trace_id": self.trace_id,
+            "user_goal": self.user_goal[:80],
+            "state": self.state.value,
+            "plan_id": self.plan_id,
+            "frame_id": self.frame_id,
+            "step_index": self.step_index,
+            "steps_done": self.steps_done,
+            "steps_skipped": self.steps_skipped,
+            "steps_failed": self.steps_failed,
+            "recovery_attempts": self.recovery_attempts,
+            "pause_reason": self.pause_reason[:120] if self.pause_reason else "",
+            "confirmed": self.confirmed,
+            "auto_confirmed": self.auto_confirmed,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -629,5 +747,6 @@ class PipelineEvent(BaseModel):
     error_message: str | None = None
 
 
-# Fix forward ref for InferenceResponse.plan
+# Fix forward refs (plan / safety defined later in file for some models)
 InferenceResponse.model_rebuild()
+StepRecord.model_rebuild()

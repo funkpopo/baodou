@@ -135,13 +135,31 @@ agent:
   max_steps: 8
   default_risk_auto: false
   plan_timeout_sec: 30
-  backend: mock
+  backend: mock            # mock | inference
+  auto_confirm: false      # CLI --yes enables for low-risk demo
+  reidentify_before_action: true
+  max_recovery_attempts: 2
+  step_timeout_ms: 10000
+  pause_on_target_missing: true
+  pause_on_verify_fail: true
+  prefer_element_id: true
+  coordinate_requires_confirm: true
+  post_action_settle_ms: 120
+  fallback_to_mock_plan: true
 
 actuator:
-  backend: mock
-  dry_run: true
+  backend: mock            # mock | win  (win still honors dry_run)
+  dry_run: true            # Phase F default: never inject real input unless explicit
   max_actions_per_minute: 30
-
+  move_duration_ms: 40
+  click_delay_ms: 30
+  type_interval_ms: 15
+  relocate_iou_min: 0.35
+  relocate_require_visible: true
+  relocate_require_enabled: true
+  verify_change_threshold: 0.008
+  verify_require_change: false
+  bound_check: true
 safety:
   default_mode: read_only  # read_only | confirm_all | allow_low
   require_confirmation_below: medium  # low | medium | high

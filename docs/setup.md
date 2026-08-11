@@ -55,6 +55,10 @@ python -m pip install -e .
 | **推理一次（mock）** | `python -m frontend.cli infer once --backend mock --vision-backend mock --goal "描述当前屏幕"` |
 | 推理一次（HTTP） | `python -m frontend.cli infer once --backend http --start-server --goal "描述当前屏幕"` |
 | 推理 bench | `python benchmarks\phase_e\run_inference_bench.py --mock` |
+| **Agent 任务（mock）** | `python -m frontend.cli agent run --goal "点击搜索按钮" --yes --mock` |
+| Agent 预览 | `python -m frontend.cli agent preview --goal "点击搜索"` |
+| 状态机 | `python -m frontend.cli agent states` |
+| Agent bench | `python benchmarks\phase_f\run_agent_bench.py` |
 
 安装 entry points 后也可用：
 
@@ -72,6 +76,10 @@ baodou-demo
   - `BAODOU_INFERENCE=mock|http`
   - `BAODOU_CAPTURE=mock|mss`
   - `BAODOU_UI_VISION=mock|composite|uia|ocr|rules`
+  - `BAODOU_AGENT=mock|inference`
+  - `BAODOU_ACTUATOR=mock|win`
+  - `BAODOU_DRY_RUN=true|false`
+  - `BAODOU_AUTO_CONFIRM=true|false`
   - `BAODOU_LLAMA_HOST` / `BAODOU_LLAMA_PORT`
   - `BAODOU_N_CTX` / `BAODOU_N_GPU_LAYERS` / `BAODOU_DEVICE`
 

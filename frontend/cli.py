@@ -1,4 +1,4 @@
-"""CLI entry: config, mock demo, capture (C), UI vision (D), inference (E)."""
+"""CLI entry: config, mock demo, capture (C), UI vision (D), inference (E), agent (F)."""
 
 from __future__ import annotations
 
@@ -236,6 +236,75 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         dest="inf_log_level",
+    )
+
+    # --- Phase F agent ---
+    ag = sub.add_parser("agent", help="Task agent / state machine (Phase F)")
+    ag_sub = ag.add_subparsers(dest="agent_cmd", required=True)
+
+    ag_run = ag_sub.add_parser("run", help="Run task: observe → plan → confirm → act → verify")
+    ag_run.add_argument("--goal", type=str, required=True, help="Natural language user goal")
+    ag_run.add_argument(
+        "--yes",
+        action="store_true",
+        help="Auto-confirm low-risk steps (still blocks high risk)",
+    )
+    ag_run.add_argument(
+        "--preview-only",
+        action="store_true",
+        help="Plan + preview only; do not execute",
+    )
+    ag_run.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=None,
+        help="Force dry-run (no real OS input); default from config",
+    )
+    ag_run.add_argument(
+        "--live",
+        action="store_true",
+        help="Allow real input when dry_run=false (dangerous; still needs --yes)",
+    )
+    ag_run.add_argument(
+        "--mock",
+        action="store_true",
+        help="Force mock capture/vision/inference/actuator (safe offline)",
+    )
+    ag_run.add_argument(
+        "--actuator",
+        choices=["mock", "win"],
+        default=None,
+        help="Override actuator.backend",
+    )
+    ag_run.add_argument("--max-steps", type=int, default=None)
+    ag_run.add_argument("--json-out", type=str, default=None)
+    ag_run.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="ag_log_level",
+    )
+
+    ag_prev = ag_sub.add_parser("preview", help="Show action previews without executing")
+    ag_prev.add_argument("--goal", type=str, required=True)
+    ag_prev.add_argument("--mock", action="store_true")
+    ag_prev.add_argument("--json-out", type=str, default=None)
+    ag_prev.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="ag_log_level",
+    )
+
+    ag_states = ag_sub.add_parser("states", help="Print task state machine graph")
+    ag_states.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="ag_log_level",
     )
     return p
 
@@ -870,6 +939,135 @@ def cmd_infer_once(
         inf.close()
 
 
+def _apply_agent_mock(cfg) -> None:
+    cfg.capture.backend = "mock"
+    cfg.ui_vision.backend = "mock"
+    cfg.inference.backend = "mock"
+    cfg.actuator.backend = "mock"
+    cfg.agent.backend = "mock"
+
+
+def cmd_agent_run(
+    config_path: str | None,
+    *,
+    goal: str,
+    yes: bool,
+    preview_only: bool,
+    dry_run: bool | None,
+    live: bool,
+    mock: bool,
+    actuator: str | None,
+    max_steps: int | None,
+    json_out: str | None,
+    log_level: str | None,
+) -> int:
+    cfg = _setup_from_args(config_path, log_level)
+    # Safe default: offline mock chain unless --live explicitly requested.
+    if mock or not live:
+        _apply_agent_mock(cfg)
+    else:
+        # Real capture + vision; actuator still dry_run unless config disables it.
+        if cfg.capture.backend == "mock":
+            cfg.capture.backend = "mss"
+        if cfg.ui_vision.backend == "mock":
+            cfg.ui_vision.backend = "composite"
+    if actuator:
+        cfg.actuator.backend = actuator  # type: ignore[assignment]
+    if dry_run is True:
+        cfg.actuator.dry_run = True
+    if live and dry_run is not True:
+        # --live alone does NOT disable dry_run; require explicit env/config change.
+        # Only turn off dry_run if user set actuator.dry_run false in config already.
+        pass
+    if yes:
+        cfg.agent.auto_confirm = True
+
+    from agent.factory import create_task_agent
+    from core.models import TaskState
+
+    agent = create_task_agent(cfg)
+    try:
+        if preview_only:
+            result = agent.preview(goal)
+        else:
+            result = agent.run(
+                goal,
+                execute=True,
+                confirmed=bool(yes),
+                max_steps=max_steps,
+            )
+        summary = {
+            "ok": result.ok,
+            "trace_id": result.trace_id,
+            "task_state": result.task.state.value,
+            "elapsed_ms": round(result.elapsed_ms, 2),
+            "goal": goal,
+            "dry_run": cfg.actuator.dry_run,
+            "auto_confirm": cfg.agent.auto_confirm,
+            "plan": result.plan.log_summary() if result.plan else None,
+            "previews": [p.log_summary() for p in result.previews],
+            "steps_done": result.task.steps_done,
+            "steps_skipped": result.task.steps_skipped,
+            "actions": [a.log_summary() for a in result.actions],
+            "verifications": [v.log_summary() for v in result.verifications],
+            "pause_reason": result.task.pause_reason or None,
+            "error": result.error.to_dict() if result.error else None,
+            "event_kinds": [e.kind.value for e in result.events],
+        }
+        _print_json(summary)
+        if json_out:
+            out = Path(json_out)
+            if not out.is_absolute():
+                out = PROJECT_ROOT / out
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(
+                json.dumps(result.to_dict(), ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            print(f"wrote {out}", file=sys.stderr)
+        if result.ok:
+            return 0
+        # Paused for confirmation is a controlled outcome (exit 2) when not --yes
+        if result.task.state == TaskState.PAUSED:
+            return 2
+        return 1
+    finally:
+        agent.close()
+
+
+def cmd_agent_preview(
+    config_path: str | None,
+    *,
+    goal: str,
+    mock: bool,
+    json_out: str | None,
+    log_level: str | None,
+) -> int:
+    return cmd_agent_run(
+        config_path,
+        goal=goal,
+        yes=False,
+        preview_only=True,
+        dry_run=True,
+        live=False,
+        mock=mock or True,
+        actuator="mock",
+        max_steps=None,
+        json_out=json_out,
+        log_level=log_level,
+    )
+
+
+def cmd_agent_states(config_path: str | None, log_level: str | None) -> int:
+    _setup_from_args(config_path, log_level)
+    from agent.state import allowed_targets
+    from core.models import TaskState
+
+    graph = {s.value: allowed_targets(s) for s in TaskState}
+    _print_json({"states": [s.value for s in TaskState], "transitions": graph})
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -937,6 +1135,33 @@ def main(argv: list[str] | None = None) -> int:
                 no_image=args.no_image,
                 stream=args.stream,
                 start_server=args.start_server,
+                json_out=args.json_out,
+                log_level=level,
+            )
+    if args.command == "agent":
+        level = getattr(args, "ag_log_level", None) or args.log_level
+        if args.agent_cmd == "states":
+            return cmd_agent_states(args.config, level)
+        if args.agent_cmd == "preview":
+            return cmd_agent_preview(
+                args.config,
+                goal=args.goal,
+                mock=bool(getattr(args, "mock", True)),
+                json_out=args.json_out,
+                log_level=level,
+            )
+        if args.agent_cmd == "run":
+            dry = True if args.dry_run else None
+            return cmd_agent_run(
+                args.config,
+                goal=args.goal,
+                yes=bool(args.yes),
+                preview_only=bool(args.preview_only),
+                dry_run=dry,
+                live=bool(args.live),
+                mock=bool(args.mock),
+                actuator=args.actuator,
+                max_steps=args.max_steps,
                 json_out=args.json_out,
                 log_level=level,
             )

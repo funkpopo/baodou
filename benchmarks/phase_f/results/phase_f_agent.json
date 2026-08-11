@@ -1,0 +1,323 @@
+{
+  "phase": "F",
+  "title": "task agent & operation state machine",
+  "tasks": {
+    "suite": "low_risk_e2e",
+    "elapsed_ms": 210.62,
+    "passed": 4,
+    "total": 4,
+    "cases": [
+      {
+        "id": "click_search",
+        "goal": "点击搜索按钮",
+        "ok": true,
+        "task_state": "completed",
+        "steps_done": 1,
+        "plan": {
+          "plan_id": "plan-6a43f3cc3d01",
+          "trace_id": "tr-7ccb6e34dd14481f",
+          "goal": "点击搜索按钮",
+          "step_count": 1,
+          "risk_max": "low",
+          "actions": [
+            "click"
+          ]
+        },
+        "previews": [
+          {
+            "preview_id": "prev-9b2c53b908f1",
+            "step_id": "step-62b629070acf",
+            "action": "click",
+            "summary": "点击 搜索 — 单击 button \"搜索\"",
+            "target_element_id": "btn_search_01",
+            "risk": "low",
+            "requires_confirmation": true,
+            "uses_coordinates": false,
+            "warnings": []
+          }
+        ],
+        "actions": [
+          {
+            "result_id": "act-af62e4399b8c",
+            "trace_id": "tr-7ccb6e34dd14481f",
+            "step_id": "step-62b629070acf",
+            "action": "click",
+            "success": true,
+            "dry_run": true,
+            "latency_ms": 5.228899997746339,
+            "resolved_element_id": "btn_search_01",
+            "relocated": true,
+            "resolved_point": {
+              "x": 1128,
+              "y": 58
+            }
+          }
+        ],
+        "verifications": [
+          {
+            "verification_id": "ver-e5e655de7bba",
+            "trace_id": "tr-7ccb6e34dd14481f",
+            "step_id": "step-62b629070acf",
+            "passed": true,
+            "message": "target present id=btn_search_01",
+            "change_score": 0.05,
+            "target_still_present": true
+          }
+        ],
+        "elapsed_ms": 60.31,
+        "traced": true
+      },
+      {
+        "id": "type_input",
+        "goal": "输入 \"hello baodou\"",
+        "ok": true,
+        "task_state": "completed",
+        "steps_done": 1,
+        "plan": {
+          "plan_id": "plan-dee12a092bcd",
+          "trace_id": "tr-887ad06172dd446e",
+          "goal": "输入 \"hello baodou\"",
+          "step_count": 1,
+          "risk_max": "low",
+          "actions": [
+            "type"
+          ]
+        },
+        "previews": [
+          {
+            "preview_id": "prev-ca04f1ec8794",
+            "step_id": "step-e99675aa8c84",
+            "action": "type",
+            "summary": "输入文本 — 在 input (inp_query_01) 输入 \"hello baodou\"",
+            "target_element_id": "inp_query_01",
+            "risk": "low",
+            "requires_confirmation": true,
+            "uses_coordinates": false,
+            "warnings": []
+          }
+        ],
+        "actions": [
+          {
+            "result_id": "act-adf44948f671",
+            "trace_id": "tr-887ad06172dd446e",
+            "step_id": "step-e99675aa8c84",
+            "action": "type",
+            "success": true,
+            "dry_run": true,
+            "latency_ms": 5.245299998932751,
+            "resolved_element_id": "inp_query_01",
+            "relocated": true,
+            "resolved_point": {
+              "x": 620,
+              "y": 58
+            }
+          }
+        ],
+        "verifications": [
+          {
+            "verification_id": "ver-9ae9700bb121",
+            "trace_id": "tr-887ad06172dd446e",
+            "step_id": "step-e99675aa8c84",
+            "passed": true,
+            "message": "target present id=inp_query_01",
+            "change_score": 0.05,
+            "target_still_present": true
+          }
+        ],
+        "elapsed_ms": 58.9,
+        "traced": true
+      },
+      {
+        "id": "observe_only",
+        "goal": "描述当前屏幕",
+        "ok": true,
+        "task_state": "completed",
+        "steps_done": 0,
+        "plan": {
+          "plan_id": "plan-23aecb66182f",
+          "trace_id": "tr-d95bb6fc387f4180",
+          "goal": "描述当前屏幕",
+          "step_count": 0,
+          "risk_max": "low",
+          "actions": []
+        },
+        "previews": [],
+        "actions": [],
+        "verifications": [],
+        "elapsed_ms": 31.65,
+        "traced": true
+      },
+      {
+        "id": "click_ok",
+        "goal": "点击确定",
+        "ok": true,
+        "task_state": "completed",
+        "steps_done": 1,
+        "plan": {
+          "plan_id": "plan-599a1e836595",
+          "trace_id": "tr-6b889f76b74941ea",
+          "goal": "点击确定",
+          "step_count": 1,
+          "risk_max": "low",
+          "actions": [
+            "click"
+          ]
+        },
+        "previews": [
+          {
+            "preview_id": "prev-e70ef5e9fe7f",
+            "step_id": "step-c9862866db10",
+            "action": "click",
+            "summary": "点击 确定 — 单击 button \"确定\"",
+            "target_element_id": "btn_ok_01",
+            "risk": "low",
+            "requires_confirmation": true,
+            "uses_coordinates": false,
+            "warnings": []
+          }
+        ],
+        "actions": [
+          {
+            "result_id": "act-eff7d257f565",
+            "trace_id": "tr-6b889f76b74941ea",
+            "step_id": "step-c9862866db10",
+            "action": "click",
+            "success": true,
+            "dry_run": true,
+            "latency_ms": 5.255899999610847,
+            "resolved_element_id": "btn_ok_01",
+            "relocated": true,
+            "resolved_point": {
+              "x": 640,
+              "y": 656
+            }
+          }
+        ],
+        "verifications": [
+          {
+            "verification_id": "ver-4f524f1ba572",
+            "trace_id": "tr-6b889f76b74941ea",
+            "step_id": "step-c9862866db10",
+            "passed": true,
+            "message": "target present id=btn_ok_01",
+            "change_score": 0.05,
+            "target_still_present": true
+          }
+        ],
+        "elapsed_ms": 59.47,
+        "traced": true
+      }
+    ]
+  },
+  "pause_on_missing": {
+    "suite": "pause_on_target_missing",
+    "ok": true,
+    "task_state": "paused",
+    "pause_reason": "element_id 在当前帧未找到: btn_search_01",
+    "error": {
+      "error_code": "target_stale",
+      "error_message": "element_id 在当前帧未找到: btn_search_01"
+    },
+    "actions_count": 0,
+    "no_blind_success": true
+  },
+  "state_machine": {
+    "suite": "state_machine",
+    "ok": true,
+    "transitions": {
+      "idle": [
+        "cancelled",
+        "failed",
+        "observing"
+      ],
+      "observing": [
+        "cancelled",
+        "completed",
+        "failed",
+        "paused",
+        "planning"
+      ],
+      "planning": [
+        "awaiting_confirmation",
+        "cancelled",
+        "completed",
+        "executing",
+        "failed",
+        "paused"
+      ],
+      "awaiting_confirmation": [
+        "cancelled",
+        "completed",
+        "executing",
+        "failed",
+        "paused"
+      ],
+      "executing": [
+        "awaiting_confirmation",
+        "cancelled",
+        "completed",
+        "failed",
+        "paused",
+        "verifying"
+      ],
+      "verifying": [
+        "awaiting_confirmation",
+        "cancelled",
+        "completed",
+        "executing",
+        "failed",
+        "observing",
+        "paused",
+        "planning"
+      ],
+      "completed": [],
+      "failed": [],
+      "paused": [
+        "awaiting_confirmation",
+        "cancelled",
+        "completed",
+        "executing",
+        "failed",
+        "observing"
+      ],
+      "cancelled": []
+    },
+    "checked": [
+      [
+        "idle",
+        "observing"
+      ],
+      [
+        "observing",
+        "planning"
+      ],
+      [
+        "planning",
+        "awaiting_confirmation"
+      ],
+      [
+        "awaiting_confirmation",
+        "executing"
+      ],
+      [
+        "executing",
+        "verifying"
+      ],
+      [
+        "verifying",
+        "completed"
+      ],
+      [
+        "executing",
+        "paused"
+      ]
+    ]
+  },
+  "ok": true,
+  "summary": {
+    "low_risk_passed": 4,
+    "low_risk_total": 4,
+    "pause_ok": true,
+    "state_ok": true
+  }
+}
