@@ -21,6 +21,18 @@ UI 识别与模型解耦：识别提供 `element_id` + bbox，模型负责语义
 
 ## 快速开始
 
+### Desktop MVP（Rust + Tauri + React）
+
+桌面端位于 [`desktop/`](desktop/)，默认启动为 `mock + dry-run`：
+
+```bat
+cd /d D:\Projects\baodou\desktop
+npm install
+npm run tauri:dev
+```
+
+它通过 Rust IPC 驱动现有 Python agent 链路，React 不直接调用系统输入或模型服务。详细说明见 [`desktop/README.md`](desktop/README.md)。
+
 ```bat
 cd /d D:\Projects\baodou
 conda activate dev

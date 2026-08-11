@@ -59,3 +59,8 @@ benchmarks/**/results/*.txt
 
 # Conda env exports (optional local)
 conda-envs/
+
+desktop/node_modules/
+dist
+target/
+.tauri

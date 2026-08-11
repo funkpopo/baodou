@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "baodou",
+  "version": "0.2.0",
+  "identifier": "com.baodou.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "baodou · 电脑操作助手",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1120,
+        "minHeight": 720,
+        "resizable": true,
+        "decorations": false,
+        "transparent": false,
+        "center": true
+      }
+    ],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "icon": ["icons/icon.ico"],
+    "targets": "all",
+    "windows": { "wix": { "language": "zh-CN" } }
+  }
+}

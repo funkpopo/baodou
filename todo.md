@@ -1,5 +1,37 @@
 # 实时 AI 电脑操作辅助助手开发计划
 
+> 规划修订版：2026-08-11
+>
+> 本文已经按当前仓库实现、`conda` 环境和 Windows 优先的产品定位重新校正。A–H 不是“全部完成即可发布”：其中 H 当前完成的是可测试的 Tk 原型，后续仍需要桌面宿主、常驻入口、全局热键、权限引导和真实桌面回归。
+
+## 0.1 当前环境与产品决策（已确认）
+
+- 目标平台：Windows 11 x64，第一版不承诺 macOS/Linux；因此第一版不引入跨平台原生壳的额外复杂度。
+- 开发环境：`conda env dev`，项目目录 `D:\Projects\baodou`。
+- 推理后端：`D:\llama\llama-server.exe`，llama.cpp SYCL build `b10356`，设备固定为 Intel Arc 的 `SYCL0`。
+- oneAPI：启动 live 推理前需要加载 `D:\Intel\oneAPI\setvars.bat`；应用自身应通过受控的 server supervisor 完成，而不是要求用户手工维护进程。
+- 模型：`Qwen3.5-2B-UD-Q4_K_XL.gguf` + `mmproj-F16.gguf`；必须把多模态能力视为“已验证的当前模型配置”，不能泛化为所有 Qwen GGUF 都支持图像。
+- 当前 UI：`frontend/app.py` 的 Tk 窗口是 H 阶段原型，适合验证会话、预览、确认和诊断，不等于最终桌面产品。
+- 产品参考：借鉴 Marvis、Codex Desktop、Claude Code Desktop 的任务会话、流式进度、人工接管、审计和安全闸门；不复制其服务端依赖或默认的自动执行策略。
+
+### 桌面架构决策
+
+第一版切换为“Rust + Tauri + WebView/React 宿主 + 现有 Python agent 兼容运行时”的渐进路线：
+
+```text
+Tauri/Rust 宿主（窗口、托盘、热键、权限、生命周期）
+        ↕ 本地 typed IPC / localhost
+现有 Python 服务（capture → vision → inference → agent → safety → actuator）
+        ↕
+React/WebView UI
+```
+
+- Python 不再承担桌面 UI、窗口生命周期或跨进程编排；它暂时作为兼容运行时保留，逐步把 capture / vision / inference / agent / safety 迁入 Rust。
+- Rust 负责宿主、任务进程、IPC、取消、状态和安全边界；React 只能调用 typed Tauri command、监听结构化事件，不能直接调用 `actuator` 或模型服务。
+- `desktop/` 已实现 Tauri 2 + React MVP；默认 `mock + dry-run`，真实 actuator 仍必须经过 Python 配置和安全策略。
+- 如果未来增加 macOS，Tauri/WebView 的跨平台成本是少量平台适配换取单一 React UI；真正的平台输入、窗口和权限差异仍封装在 Rust/Tauri 层。
+- 桌面路线遵循 T1“把边界放在渲染表面”、T3“采用平台能力而非自行模拟”。
+
 ## 0. 项目目标与范围
 
 ### 总体目标
@@ -241,11 +273,13 @@ UI / API / 日志
 
 **阶段 H 完成记录（2026-08-11）：**
 - 会话层：`frontend/session.py`（无头可测）· 修正 `corrections.py` · 指标 `metrics.py` · 高亮 `highlight.py` · 诊断 `diagnostics.py`
-- 主窗口：`frontend/app.py`（Tk）· 入口 `ui open` / `baodou-ui`
+- 主窗口原型：`frontend/app.py`（Tk）· 入口 `ui open` / `baodou-ui`；这项验收只代表功能原型可用，不代表最终桌面端体验完成
 - 协议：`UserCorrection` · `ActivityPhase` · `MetricsSnapshot` · `TaskContext.corrections`
 - CLI：`python -m frontend.cli ui open|run|status|correct`
 - Bench：`python benchmarks/phase_h/run_ui_bench.py`
 - 文档：`docs/frontend.md`；默认 GUI mock + dry_run
+
+**阶段 H 尚未覆盖的产品能力：** Windows 原生窗口生命周期、系统托盘、全局暂停/唤醒热键、开机启动策略、前台窗口/权限引导、应用失焦处理、模型服务崩溃提示和真实输入模式下的用户确认体验。这些内容移入阶段 K，不再把 Tk 原型误认为发布版桌面端。
 
 ## 阶段 I：测试、评测与性能优化
 
@@ -339,13 +373,13 @@ UI / API / 日志
 
 ## 5. 近期执行顺序
 
-1. 完成阶段 A，特别是确认 Qwen3.5-2B-GGUF 的真实视觉输入能力和运行参数。
-2. 建立阶段 B 的项目骨架、协议、日志和配置。
-3. 先完成阶段 C 的截图/坐标管线，再做任何自动点击，确保坐标正确。
-4. 实现阶段 D 的 UI 元素统一协议和第一批识别来源。
-5. 完成阶段 E 的 llama.cpp 封装及结构化输出校验。
-6. 用只读屏幕问答验证模型，再接入阶段 F 的低风险点击/输入闭环。
-7. 在扩大任务范围前完成阶段 G 的安全策略、阶段 I 的回放测试和失败恢复。
+1. 保持 A–H 的已完成能力可回归：先运行 `pytest`、各阶段 bench 和 `scripts/dev_check.bat`，记录当前基线。
+2. 完成 I1–I3 的离线回放、集成测试和真实桌面沙箱测试；不以 CLI mock 结果代替桌面验收。
+3. 优先实现 K1 的 Windows 宿主、单实例、托盘、全局热键和 Python/llama-server supervisor。
+4. 固化 IPC v1 和会话事件模型，再把 Tk 原型中的会话能力接入宿主；宿主不得越过 Python agent 直接操作系统输入。
+5. 完成 K2 的任务会话体验和真实输入确认闭环；真实 actuator 只在隔离沙箱中启用。
+6. 完成 J/K3 的模型导入、依赖诊断、打包、安装卸载、崩溃恢复和性能门禁。
+7. 第一版发布后再评估 macOS；只有明确增加第二个 OS，才启动 K4 的双原生宿主方案。
 
 ## 6. 关键风险与应对
 
@@ -371,3 +405,39 @@ UI / API / 日志
 - [ ] 敏感内容默认不进入日志，用户能看到采集、推理和执行状态。
 - [ ] 有自动化测试、离线回放样例、性能报告、安装文档和已知限制说明。
 
+## 8. 阶段 K：Windows 桌面产品化（当前主线）
+
+阶段 K 是在 A–H 原型基础上面向 Marvis / Codex Desktop / Claude Code Desktop 类桌面体验的增量阶段。它不改变现有 Python 模块职责，先解决宿主和真实桌面闭环。
+
+### K1. 原生宿主与进程治理
+
+- [x] 选择并记录 Windows 宿主技术：Tauri 2 + Rust + 系统 WebView，React/TypeScript 作为共享渲染层。
+- [x] 完成无边框主窗口、最小尺寸、Rust 状态管理、任务事件流和 React typed bridge（`desktop/`）。
+- [ ] 宿主补齐系统托盘、前台激活、关闭/隐藏语义、单实例锁和全局暂停/紧急停止热键。
+- [x] 实现 MVP Python agent supervisor：通过 `conda run -n dev` 启动受控任务、收集结果、映射为 Tauri 事件；后续补充常驻进程和崩溃重启。
+- [x] 定义 IPC v1：命令、事件、确认、暂停、停止和错误均带 `protocol_version` 或结构化状态。
+- [ ] 将 `D:\llama` 与 oneAPI 初始化封装为可诊断的 Rust server supervisor，避免把完整环境变量或密钥写入日志。
+
+### K2. Desktop 会话体验
+
+- [x] 设计并实现三种稳定状态：`idle`、`observing/running`、`awaiting_user`；用户可以看到当前目标、当前步骤、等待原因和下一步影响。
+- [ ] 支持任务会话历史、停止后继续/重新规划、人工接管、用户修正和“一步执行/执行到完成”两种模式。
+- [x] 实现确认卡片、任务事件时间线、风险边界、暂停和停止入口；目标元素高亮和真实屏幕预览将在下一迭代接入。
+- [ ] 真实屏幕采集、推理、执行期间显示明确的采集/推理/即将输入状态；敏感区域遮罩状态可见。
+- [ ] 默认启动仍为 mock + dry-run；切换到真实输入必须有显式设置、权限检查和二次确认，并提供醒目的当前模式标识。
+- [ ] 对窗口切换、锁屏、UAC、远程桌面、权限被撤回和焦点丢失建立可理解的用户提示与安全暂停。
+
+### K3. 真实桌面验收与发布门禁
+
+- [ ] 建立隔离的 Windows 沙箱应用集：记事本、计算器、浏览器测试页、文件管理器测试目录和自建确认页；禁止用真实支付/生产账号验收。
+- [ ] 完成 10 个可回放/可重复的低风险任务，至少覆盖点击、输入、快捷键、滚动、拖拽、弹窗、窗口切换和失败恢复。
+- [ ] 真实输入模式下完成全局停止、目标失效暂停、确认拒绝、模型超时、server 崩溃重启和审计记录验收。
+- [ ] 建立 Windows 11 不同 DPI、单屏/双屏、缩放和窗口排列矩阵；每次 actuator 或坐标代码改动必须跑坐标回归。
+- [ ] 输出冷启动、热启动、首次截图、首次理解、计划、动作和验证的 P50/P95 指标；同时记录 CPU/GPU/内存和 llama-server 重启次数。
+- [ ] 形成可安装包、卸载流程、配置迁移、模型导入/校验、权限说明、崩溃日志和一键诊断报告。
+
+### K4. 后续跨平台分支（暂不排入第一版）
+
+- [ ] 当 macOS 进入目标范围后，先做 AppKit 宿主 + WKWebView 的风险原型，再决定是否共享 WebView/React UI。
+- [ ] 补充 macOS 辅助功能权限、屏幕录制权限、全局事件和坐标系统的独立安全评审。
+- [ ] 若采用双原生宿主，建立跨宿主 IPC 合约测试；不复制一份 Python/模型/安全策略到另一套实现。
