@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { bridge } from "./bridge";
@@ -33,6 +33,7 @@ function App() {
   const [mmprojPathDraft, setMmprojPathDraft] = useState("");
   const [llamaUrlDraft, setLlamaUrlDraft] = useState("");
   const [modelConfigMessage, setModelConfigMessage] = useState("");
+  const taskSubmissionLock = useRef(false);
 
   useEffect(() => {
     bridge.runtime().then(setRuntime).catch(() => setError("无法连接本地运行时"));
@@ -43,12 +44,16 @@ function App() {
     let cancelled = false;
     bridge.onTask((event) => {
       setEvents((current) => {
-        const previous = current.at(-1);
-        if (previous && previous.taskId === event.taskId && previous.phase === event.phase && previous.title === event.title && previous.detail === event.detail) return current;
+        const existingIndex = current.findIndex((item) => item.taskId === event.taskId && item.phase === event.phase && item.title === event.title);
+        if (existingIndex >= 0) {
+          const next = [...current];
+          next[existingIndex] = event;
+          return next;
+        }
         return [...current.slice(-7), event];
       });
       setRuntime((current) => ({ ...current, phase: event.phase, message: event.detail }));
-      if (event.complete || event.phase === "error") setBusy(false);
+      if (event.complete || event.phase === "error") { setBusy(false); taskSubmissionLock.current = false; }
     }).then((unlisten) => { if (cancelled) unlisten(); else cleanup = unlisten; });
     return () => { cancelled = true; window.clearInterval(runtimeTimer); cleanup?.(); };
   }, []);
@@ -61,7 +66,8 @@ function App() {
 
   async function startTask() {
     const value = goal.trim();
-    if (!value || busy) return;
+    if (!value || busy || taskSubmissionLock.current) return;
+    taskSubmissionLock.current = true;
     setError(""); setBusy(true); setEvents([]);
     setRuntime((current) => ({ ...current, phase: "observing", goal: value, message: "任务已提交，正在观察屏幕…" }));
     setEvents([{
@@ -69,8 +75,8 @@ function App() {
       detail: "正在连接本地模型并采集屏幕，请稍候…", timestamp: new Date().toISOString(),
       requiresConfirmation: false, complete: false, ok: true,
     }]);
-    try { await bridge.start(value, live, true); }
-    catch (cause) { setBusy(false); setError(String(cause)); }
+    try { await bridge.start(value, live, false); }
+    catch (cause) { setBusy(false); taskSubmissionLock.current = false; setError(String(cause)); }
   }
 
   async function action(fn: () => Promise<RuntimeSnapshot>) {

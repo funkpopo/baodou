@@ -119,6 +119,7 @@ struct PlanStep {
     text: Option<String>,
     risk: String,
     expected_change: String,
+    requires_confirmation: bool,
 }
 
 #[derive(Clone)]
@@ -519,7 +520,7 @@ fn run_native_task(app: AppHandle, task_id: String, goal: String, live: bool, au
         .pending_plan
         .lock()
         .expect("pending plan poisoned") = Some(plan.clone());
-    let requires_confirmation = plan.step.action != "wait";
+    let requires_confirmation = plan.step.requires_confirmation;
     update_snapshot(&app.state::<RuntimeState>(), |s| {
         s.phase = "awaiting_user".into();
         s.model_ready = live;
@@ -533,8 +534,9 @@ fn run_native_task(app: AppHandle, task_id: String, goal: String, live: bool, au
             "awaiting_user",
             "计划已准备，等待确认",
             format!(
-                "{}。动作：{}；目标：{}；预期：{}",
-                plan.observation, plan.step.action, plan.step.target, plan.step.expected_change
+                "{}。动作：{}；目标：{}；预期：{}；权限决定：{}",
+                plan.observation, plan.step.action, plan.step.target, plan.step.expected_change,
+                if requires_confirmation { "模型申请授权" } else { "模型判断无需授权" }
             ),
             requires_confirmation,
             false,
@@ -644,7 +646,7 @@ fn capture_primary() -> Result<ScreenFrame, String> {
 }
 
 fn infer_plan(app: &AppHandle, task_id: &str, goal: &str, frame: &ScreenFrame, endpoint: &str) -> Result<NativePlan, String> {
-    let prompt = "You are a local Windows computer-use planner. Reply ONLY valid JSON: {\"observation\":string,\"steps\":[{\"action\":string,\"target\":string,\"x\":integer|null,\"y\":integer|null,\"text\":string|null,\"risk\":string,\"expected_change\":string}]}. Handle the user's requested observation or internal operation directly and return the next useful step.";
+    let prompt = "You are a local Windows computer-use planner. Reply ONLY valid JSON: {\"observation\":string,\"steps\":[{\"action\":string,\"target\":string,\"x\":integer|null,\"y\":integer|null,\"text\":string|null,\"risk\":string,\"expected_change\":string,\"requires_confirmation\":boolean}]}. Decide requires_confirmation from the user's intent and the consequences of the proposed step. Do not use a fixed action-name rule: inspect the actual intent, target, requested outcome, reversibility, sensitivity, and whether external state or data will change. Return false for information-only work when no permission is needed, and true when the user should authorize the proposed step. Handle the user's requested observation or internal operation directly and return the next useful step.";
     let payload = json!({
         "messages": [
             {"role": "system", "content": prompt},
@@ -682,19 +684,8 @@ fn infer_plan(app: &AppHandle, task_id: &str, goal: &str, frame: &ScreenFrame, e
         }
     }
     if content.trim().is_empty() { return Err("模型流没有返回内容".into()); }
-    let parsed: Value = match serde_json::from_str(strip_json_fence(&content)) {
-        Ok(value) => value,
-        Err(_) => {
-            return Ok(NativePlan {
-                observation: content.trim().to_string(),
-                step: PlanStep {
-                    action: "wait".into(), target: "当前前台应用".into(), x: None, y: None,
-                    text: None, risk: "low".into(), expected_change: "返回模型观察结果".into(),
-                },
-                blocked_reason: None,
-            });
-        }
-    };
+    let parsed: Value = serde_json::from_str(&content)
+        .map_err(|error| format!("模型响应不是有效 JSON：{error}"))?;
     let observation = parsed
         .get("observation")
         .and_then(Value::as_str)
@@ -714,14 +705,6 @@ fn infer_plan(app: &AppHandle, task_id: &str, goal: &str, frame: &ScreenFrame, e
     })
 }
 
-fn strip_json_fence(text: &str) -> &str {
-    text.trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim()
-}
-
 fn fallback_plan(goal: &str, model_error: Option<String>) -> NativePlan {
     let detail = model_error
         .map(|e| format!("本地规则规划已启用（模型不可用：{e}）"))
@@ -734,6 +717,7 @@ fn fallback_plan(goal: &str, model_error: Option<String>) -> NativePlan {
         text: None,
         risk: "low".into(),
         expected_change: "仅完成观察，不注入输入".into(),
+        requires_confirmation: false,
     };
     NativePlan {
         observation: format!("{detail}。已记录任务“{goal}”，等待你确认下一步。"),
@@ -743,8 +727,8 @@ fn fallback_plan(goal: &str, model_error: Option<String>) -> NativePlan {
 }
 
 fn execute_safe_action(plan: &NativePlan, live: bool) -> Result<String, String> {
-    if plan.step.action == "wait" {
-        return Ok(format!("模型结果：{}；已完成只读观察，未向系统注入输入", plan.observation));
+    if plan.step.requires_confirmation == false {
+        return Ok(format!("模型结果：{}；模型判断无需授权，已完成该步骤", plan.observation));
     }
     if !live {
         return Ok("预览模式已确认计划；dry-run 未向系统注入输入".into());
@@ -754,6 +738,7 @@ fn execute_safe_action(plan: &NativePlan, live: bool) -> Result<String, String> 
         plan.step.action
     ))
 }
+
 
 fn now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
