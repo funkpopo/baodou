@@ -13,6 +13,13 @@ export interface RuntimeSnapshot {
   message: string;
 }
 
+export interface ModelConfig {
+  serverPath: string;
+  modelPath: string;
+  mmprojPath: string;
+  llamaUrl: string;
+}
+
 export interface TaskEvent {
   taskId: string;
   phase: Phase;

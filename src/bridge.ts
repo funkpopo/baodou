@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { RuntimeSnapshot, TaskEvent } from "./types";
+import type { ModelConfig, RuntimeSnapshot, TaskEvent } from "./types";
 
 export const bridge = {
   runtime: () => invoke<RuntimeSnapshot>("get_runtime"),
+  modelConfig: () => invoke<ModelConfig>("get_model_config"),
+  saveModelConfig: (config: ModelConfig) => invoke<ModelConfig>("set_model_config", { config }),
   start: (goal: string, live: boolean, autoConfirm = false) =>
     invoke<string>("run_task", { request: { goal, live, autoConfirm } }),
   confirm: () => invoke<RuntimeSnapshot>("confirm_task"),
