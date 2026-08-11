@@ -233,5 +233,15 @@ safety:
   ignore_screen_instructions: true
 
 frontend:
-  mode: cli
+  mode: cli                 # cli | gui
   show_trace: true
+  window_title: "baodou — AI 桌面助手"
+  refresh_ms: 500
+  preview_max_width: 720
+  preview_max_height: 480
+  show_diagnostics: true
+  metrics_interval_ms: 1000
+  activity_indicators: true
+  recent_errors_max: 12
+  auto_refresh_preview: false
+  default_mock: true        # GUI 默认 mock 后端，避免误操作

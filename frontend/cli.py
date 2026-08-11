@@ -1,4 +1,4 @@
-"""CLI entry: config, mock demo, capture (C), UI vision (D), inference (E), agent (F), safety (G)."""
+"""CLI entry: config, mock demo, capture (C), UI vision (D), inference (E), agent (F), safety (G), UI (H)."""
 
 from __future__ import annotations
 
@@ -364,6 +364,73 @@ def _build_parser() -> argparse.ArgumentParser:
     aud_clean.add_argument("--days", type=int, default=None, help="Remove files older than N days")
     aud_clean.add_argument("--wipe", action="store_true", help="Wipe all audit files")
     saf_audit_sub.add_parser("disable", help="Disable audit file persistence (runtime)")
+
+    # --- Phase H UI / observability ---
+    ui = sub.add_parser("ui", help="Main window / session observability (Phase H)")
+    ui_sub = ui.add_subparsers(dest="ui_cmd", required=True)
+
+    ui_open = ui_sub.add_parser("open", help="Open Tk main window")
+    ui_open.add_argument(
+        "--live",
+        action="store_true",
+        help="Use real capture/vision backends (still dry_run by default)",
+    )
+    ui_open.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="ui_log_level",
+    )
+
+    ui_run = ui_sub.add_parser(
+        "run", help="Headless session: observe/plan/execute via UISession (no Tk)"
+    )
+    ui_run.add_argument("--goal", type=str, required=True)
+    ui_run.add_argument("--yes", action="store_true", help="Auto-confirm low-risk steps")
+    ui_run.add_argument("--preview-only", action="store_true")
+    ui_run.add_argument("--mock", action="store_true", default=True)
+    ui_run.add_argument(
+        "--reject",
+        type=str,
+        default=None,
+        help="Reject element_id before run (user correction)",
+    )
+    ui_run.add_argument(
+        "--prefer",
+        type=str,
+        default=None,
+        help="Prefer element_id before run (user correction)",
+    )
+    ui_run.add_argument("--json-out", type=str, default=None)
+    ui_run.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="ui_log_level",
+    )
+
+    ui_status = ui_sub.add_parser("status", help="Headless session status + metrics sample")
+    ui_status.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="ui_log_level",
+    )
+
+    ui_corr = ui_sub.add_parser("correct", help="Demo user corrections on mock vision")
+    ui_corr.add_argument("--goal", type=str, default="点击搜索按钮")
+    ui_corr.add_argument("--reject", type=str, default=None)
+    ui_corr.add_argument("--prefer", type=str, default=None)
+    ui_corr.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        dest="ui_log_level",
+    )
 
     return p
 
@@ -1216,7 +1283,9 @@ def cmd_safety_check(
     plan = ActionPlan(goal=goal, steps=[step], risk_max=RiskLevel(risk))
     screen_texts = [screen_text] if screen_text else []
     threats = scan_plan(plan, cfg=cfg.safety, screen_texts=screen_texts)
-    cat, elev, rules = classify_step(step, plan=plan, sensitive_keywords=cfg.safety.sensitive_keywords)
+    cat, elev, rules = classify_step(
+        step, plan=plan, sensitive_keywords=cfg.safety.sensitive_keywords
+    )
     decision = SafetyPolicy(cfg).evaluate(
         step, plan, screen_texts=screen_texts, threat_report=threats
     )
@@ -1251,7 +1320,9 @@ def cmd_safety_threats() -> int:
     return 0
 
 
-def cmd_safety_audit(config_path: str | None, audit_cmd: str, *, days: int | None, wipe: bool) -> int:
+def cmd_safety_audit(
+    config_path: str | None, audit_cmd: str, *, days: int | None, wipe: bool
+) -> int:
     cfg = _setup_from_args(config_path, None)
     from safety.audit import AuditLog
 
@@ -1275,6 +1346,159 @@ def cmd_safety_audit(config_path: str | None, audit_cmd: str, *, days: int | Non
         return 0
     _print_json({"ok": False, "error": f"unknown audit cmd {audit_cmd}"})
     return 1
+
+
+def cmd_ui_open(config_path: str | None, *, live: bool, log_level: str | None) -> int:
+    from frontend.app import run_app
+
+    return run_app(config_path, mock=not live, log_level=log_level)
+
+
+def cmd_ui_run(
+    config_path: str | None,
+    *,
+    goal: str,
+    yes: bool,
+    preview_only: bool,
+    mock: bool,
+    reject: str | None,
+    prefer: str | None,
+    json_out: str | None,
+    log_level: str | None,
+) -> int:
+    cfg = _setup_from_args(config_path, log_level)
+    from core.models import TaskState
+    from safety.control import reset_safety_control
+
+    from frontend.session import UISession
+
+    reset_safety_control()
+    # Headless runs default to allow_low + auto when --yes so mock demos complete
+    if yes:
+        cfg.safety.default_mode = "allow_low"
+        cfg.agent.auto_confirm = True
+    session = UISession(cfg, mock=mock if mock is not False else True)
+    if reject:
+        session.reject_element(reject, note="cli reject")
+    if prefer:
+        session.prefer_element(prefer, note="cli prefer")
+    result = session.start_task(
+        goal,
+        execute=not preview_only,
+        auto_confirm=bool(yes),
+        background=False,
+    )
+    assert result is not None
+    snap = session.snapshot()
+    diag = session.diagnostics().to_dict()
+    payload = {
+        "ok": result.ok,
+        "trace_id": result.trace_id,
+        "task_state": result.task.state.value,
+        "elapsed_ms": round(result.elapsed_ms, 2),
+        "goal": goal,
+        "activity": snap.activity.log_summary(),
+        "metrics": snap.metrics.log_summary(),
+        "corrections": snap.corrections,
+        "plan": result.plan.log_summary() if result.plan else None,
+        "previews": [p.log_summary() for p in result.previews],
+        "observation": (result.observation.observation[:200] if result.observation else ""),
+        "elements": snap.elements[:16],
+        "error": result.error.to_dict() if result.error else None,
+        "diagnostics_keys": list(diag.keys()),
+    }
+    _print_json(payload)
+    if json_out:
+        out = Path(json_out)
+        if not out.is_absolute():
+            out = PROJECT_ROOT / out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        full = {
+            **payload,
+            "snapshot": snap.to_dict(),
+            "diagnostics": diag,
+            "result": result.to_dict(),
+        }
+        out.write_text(
+            json.dumps(full, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+        )
+        print(f"wrote {out}", file=sys.stderr)
+    if result.ok:
+        return 0
+    if result.task.state == TaskState.PAUSED:
+        return 2
+    return 1
+
+
+def cmd_ui_status(config_path: str | None, log_level: str | None) -> int:
+    cfg = _setup_from_args(config_path, log_level)
+    from safety.control import get_safety_control
+
+    from frontend.session import UISession
+
+    session = UISession(cfg, mock=True)
+    snap = session.snapshot()
+    _print_json(
+        {
+            "frontend": {
+                "mode": cfg.frontend.mode,
+                "window_title": cfg.frontend.window_title,
+                "show_diagnostics": cfg.frontend.show_diagnostics,
+                "activity_indicators": cfg.frontend.activity_indicators,
+                "default_mock": cfg.frontend.default_mock,
+            },
+            "activity": snap.activity.log_summary(),
+            "metrics": snap.metrics.log_summary(),
+            "control": get_safety_control().status(),
+            "dry_run": cfg.actuator.dry_run,
+        }
+    )
+    return 0
+
+
+def cmd_ui_correct(
+    config_path: str | None,
+    *,
+    goal: str,
+    reject: str | None,
+    prefer: str | None,
+    log_level: str | None,
+) -> int:
+    cfg = _setup_from_args(config_path, log_level)
+    from frontend.corrections import apply_corrections_to_goal, apply_corrections_to_vision
+    from frontend.session import UISession
+
+    session = UISession(cfg, mock=True)
+    # Seed vision via refresh
+    session.refresh_observe(goal)
+    vision = session.get_last_vision()
+    before = len(vision.elements) if vision else 0
+    if reject:
+        session.reject_element(reject)
+    elif vision and vision.elements:
+        # Default: reject first non-preferred element for demo
+        session.reject_element(vision.elements[0].element_id, note="不是这个")
+    if prefer:
+        session.prefer_element(prefer)
+    elif vision and len(vision.elements) > 1:
+        session.prefer_element(vision.elements[min(1, len(vision.elements) - 1)].element_id)
+    effective = apply_corrections_to_goal(goal, session.corrections.to_list())
+    after_vision = (
+        apply_corrections_to_vision(vision, session.corrections.to_list()) if vision else None
+    )
+    _print_json(
+        {
+            "goal": goal,
+            "effective_goal": effective,
+            "corrections": session.corrections.log_summary(),
+            "elements_before": before,
+            "elements_after": len(after_vision.elements) if after_vision else 0,
+            "element_ids_after": [
+                e.element_id for e in (after_vision.elements if after_vision else [])
+            ][:16],
+        }
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1407,6 +1631,32 @@ def main(argv: list[str] | None = None) -> int:
                 args.audit_cmd,
                 days=getattr(args, "days", None),
                 wipe=bool(getattr(args, "wipe", False)),
+            )
+    if args.command == "ui":
+        level = getattr(args, "ui_log_level", None) or args.log_level
+        if args.ui_cmd == "open":
+            return cmd_ui_open(args.config, live=bool(args.live), log_level=level)
+        if args.ui_cmd == "run":
+            return cmd_ui_run(
+                args.config,
+                goal=args.goal,
+                yes=bool(args.yes),
+                preview_only=bool(args.preview_only),
+                mock=bool(getattr(args, "mock", True)),
+                reject=getattr(args, "reject", None),
+                prefer=getattr(args, "prefer", None),
+                json_out=args.json_out,
+                log_level=level,
+            )
+        if args.ui_cmd == "status":
+            return cmd_ui_status(args.config, level)
+        if args.ui_cmd == "correct":
+            return cmd_ui_correct(
+                args.config,
+                goal=args.goal,
+                reject=getattr(args, "reject", None),
+                prefer=getattr(args, "prefer", None),
+                log_level=level,
             )
     parser.error(f"unknown command {args.command}")
     return 2

@@ -314,8 +314,20 @@ class SafetySection(BaseModel):
 
 
 class FrontendSection(BaseModel):
-    mode: Literal["cli"] = "cli"
+    """CLI + GUI (Phase H) settings."""
+
+    mode: Literal["cli", "gui"] = "cli"
     show_trace: bool = True
+    window_title: str = "baodou — AI 桌面助手"
+    refresh_ms: int = 500
+    preview_max_width: int = 720
+    preview_max_height: int = 480
+    show_diagnostics: bool = True
+    metrics_interval_ms: int = 1000
+    activity_indicators: bool = True
+    recent_errors_max: int = 12
+    auto_refresh_preview: bool = False  # live preview loop (CPU cost)
+    default_mock: bool = True  # GUI defaults to mock backends for safety
 
 
 class AppConfig(BaseModel):

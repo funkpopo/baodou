@@ -15,8 +15,9 @@ UI 识别与模型解耦：识别提供 `element_id` + bbox，模型负责语义
 | D UI 识别 | ✅ UIA + rules 融合、多分辨率坐标、紧凑上下文 |
 | E 推理层 | ✅ llama-server 生命周期、结构化校验、降级与 prompt 版本 |
 | F 任务代理 | ✅ 状态机、预览确认、重定位、验证、失败暂停（默认 dry_run） |
-| **G 安全权限** | ✅ 风险分级、硬拦截、紧急停止、审计脱敏、威胁门控 |
-| H+ UI 与后续 | ⏳ 未开始 |
+| G 安全权限 | ✅ 风险分级、硬拦截、紧急停止、审计脱敏、威胁门控 |
+| **H 用户界面** | ✅ 主窗口、修正、指标、诊断、活动/隐私指示 |
+| I+ 评测与发布 | ⏳ 未开始 |
 
 ## 快速开始
 
@@ -33,9 +34,12 @@ python -m frontend.cli infer once --backend mock --vision-backend mock --goal "�
 python -m frontend.cli agent run --goal "点击搜索按钮" --yes --mock
 python -m frontend.cli safety status
 python -m frontend.cli safety check --goal "删除并支付" --action click
+python -m frontend.cli ui status
+python -m frontend.cli ui run --goal "点击搜索按钮" --yes --preview-only
+python -m frontend.cli ui open
 ```
 
-更多：[`docs/setup.md`](docs/setup.md) · [`docs/capture.md`](docs/capture.md) · [`docs/ui_vision.md`](docs/ui_vision.md) · [`docs/inference.md`](docs/inference.md) · [`docs/agent.md`](docs/agent.md) · [`docs/safety.md`](docs/safety.md)
+更多：[`docs/setup.md`](docs/setup.md) · [`docs/capture.md`](docs/capture.md) · [`docs/ui_vision.md`](docs/ui_vision.md) · [`docs/inference.md`](docs/inference.md) · [`docs/agent.md`](docs/agent.md) · [`docs/safety.md`](docs/safety.md) · [`docs/frontend.md`](docs/frontend.md)
 
 ## 模块
 
@@ -47,7 +51,7 @@ python -m frontend.cli safety check --goal "删除并支付" --action click
 | `agent/` | 任务与计划 |
 | `actuator/` | 结构化动作执行 |
 | `safety/` | 风险、确认、拦截、审计、脱敏、紧急停止 |
-| `frontend/` | CLI |
+| `frontend/` | CLI + GUI 会话 / 主窗口 |
 | `core/` | 协议、配置、日志、错误、取消 |
 | `tests/` | 自动化测试 |
 | `benchmarks/` | 性能与场景基线 |

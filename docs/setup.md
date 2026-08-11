@@ -59,12 +59,19 @@ python -m pip install -e .
 | Agent 预览 | `python -m frontend.cli agent preview --goal "点击搜索"` |
 | 状态机 | `python -m frontend.cli agent states` |
 | Agent bench | `python benchmarks\phase_f\run_agent_bench.py` |
+| 安全状态 | `python -m frontend.cli safety status` |
+| **UI 状态（无头）** | `python -m frontend.cli ui status` |
+| UI 会话预览 | `python -m frontend.cli ui run --goal "点击搜索" --yes --preview-only` |
+| **主窗口** | `python -m frontend.cli ui open` 或 `baodou-ui` |
+| 用户修正 demo | `python -m frontend.cli ui correct --goal "搜索"` |
+| UI bench | `python benchmarks\phase_h\run_ui_bench.py` |
 
 安装 entry points 后也可用：
 
 ```bat
 baodou demo --goal "点击搜索按钮"
 baodou-demo
+baodou-ui
 ```
 
 ## 配置

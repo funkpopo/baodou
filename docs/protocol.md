@@ -22,7 +22,10 @@
 | `ActionResult` | 执行结果 |
 | `VerificationResult` | 动作后验证 |
 | `SafetyDecision` | 安全裁决 |
-| `TaskContext` | 任务状态机上下文 |
+| `TaskContext` | 任务状态机上下文（含 `corrections`） |
+| `UserCorrection` / `CorrectionKind` | 用户目标修正（阶段 H） |
+| `ActivityPhase` / `ActivityStatus` | UI 活动/隐私指示 |
+| `MetricsSnapshot` | 延迟与资源快照 |
 | `PipelineEvent` | 带 `trace_id` 的链路事件 |
 
 ## 坐标约定

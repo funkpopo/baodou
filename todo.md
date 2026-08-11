@@ -229,13 +229,23 @@ UI / API / 日志
 
 ## 阶段 H：用户界面与可观测性
 
-- [ ] 实现常驻入口或主窗口：开始/暂停、任务输入、当前状态和紧急停止。
-- [ ] 显示实时屏幕解读、识别到的 UI 元素和目标高亮框。
-- [ ] 显示当前计划、即将执行的动作、风险级别和确认按钮。
-- [ ] 支持用户修正目标：“不是这个按钮”“点击这里”“忽略该区域”，并将修正作为当前任务上下文。
-- [ ] 展示模型延迟、识别延迟、队列长度、CPU/GPU/内存占用和最近错误。
-- [ ] 增加开发者诊断视图：原始截图、ROI、UI 树、OCR、融合结果、prompt、结构化输出和验证结果。
-- [ ] 为隐私设计可见状态提示，让用户明确知道何时正在采集屏幕、何时正在推理和何时即将执行操作。
+- [x] 实现常驻入口或主窗口：开始/暂停、任务输入、当前状态和紧急停止。
+- [x] 显示实时屏幕解读、识别到的 UI 元素和目标高亮框。
+- [x] 显示当前计划、即将执行的动作、风险级别和确认按钮。
+- [x] 支持用户修正目标：“不是这个按钮”“点击这里”“忽略该区域”，并将修正作为当前任务上下文。
+- [x] 展示模型延迟、识别延迟、队列长度、CPU/GPU/内存占用和最近错误。
+- [x] 增加开发者诊断视图：原始截图、ROI、UI 树、OCR、融合结果、prompt、结构化输出和验证结果。
+- [x] 为隐私设计可见状态提示，让用户明确知道何时正在采集屏幕、何时正在推理和何时即将执行操作。
+
+**阶段验收：** 主窗口可完成一次 mock 任务预览与确认流；用户修正进入任务上下文；活动指示与指标面板可见；无头 bench 通过。
+
+**阶段 H 完成记录（2026-08-11）：**
+- 会话层：`frontend/session.py`（无头可测）· 修正 `corrections.py` · 指标 `metrics.py` · 高亮 `highlight.py` · 诊断 `diagnostics.py`
+- 主窗口：`frontend/app.py`（Tk）· 入口 `ui open` / `baodou-ui`
+- 协议：`UserCorrection` · `ActivityPhase` · `MetricsSnapshot` · `TaskContext.corrections`
+- CLI：`python -m frontend.cli ui open|run|status|correct`
+- Bench：`python benchmarks/phase_h/run_ui_bench.py`
+- 文档：`docs/frontend.md`；默认 GUI mock + dry_run
 
 ## 阶段 I：测试、评测与性能优化
 

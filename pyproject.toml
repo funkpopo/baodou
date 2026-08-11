@@ -39,6 +39,7 @@ ocr = [
 [project.scripts]
 baodou = "frontend.cli:main"
 baodou-demo = "frontend.cli:demo_main"
+baodou-ui = "frontend.app:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -1,1 +1,1 @@
-"""User-facing entrypoints (CLI for Phase B)."""
+"""User-facing entrypoints: CLI + GUI session (Phase H)."""

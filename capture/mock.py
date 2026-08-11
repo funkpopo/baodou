@@ -97,4 +97,17 @@ class MockCapture(CaptureBackend):
             extra={"backend": "mock", "synthetic": True, "seq": self._seq},
         )
         log_event(_log, "capture.frame", **frame.log_summary())
-        return MockPacket(meta=frame, image=None)
+        # Synthetic RGB image so UI preview / highlight work offline (Phase H).
+        image = None
+        try:
+            from PIL import Image, ImageDraw
+
+            image = Image.new("RGB", (max(1, w), max(1, h)), color=(40, 44, 52))
+            draw = ImageDraw.Draw(image)
+            # Fake "search" button region (matches common mock UI element layout)
+            draw.rectangle([100, 40, 196, 76], outline=(64, 160, 255), width=2)
+            draw.rectangle([220, 40, 300, 76], outline=(200, 200, 200), width=1)
+            draw.text((108, 48), "Search", fill=(220, 220, 220))
+        except Exception:  # noqa: BLE001
+            image = None
+        return MockPacket(meta=frame, image=image)

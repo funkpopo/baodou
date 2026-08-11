@@ -659,6 +659,113 @@ class StepRecord(BaseModel):
     error_message: str | None = None
 
 
+class CorrectionKind(StrEnum):
+    """User target corrections for the current task (Phase H)."""
+
+    REJECT_ELEMENT = "reject_element"  # "不是这个按钮"
+    PREFER_ELEMENT = "prefer_element"  # "点击这个"
+    CLICK_HERE = "click_here"  # explicit point
+    IGNORE_REGION = "ignore_region"  # mask / skip area
+    NOTE = "note"  # free-form guidance for planner context
+
+
+class UserCorrection(BaseModel):
+    """One user correction applied as task context (not free-form OS input)."""
+
+    protocol_version: str = PROTOCOL_VERSION
+    correction_id: str = Field(default_factory=lambda: _new_id("corr"))
+    kind: CorrectionKind
+    element_id: str | None = None
+    point: Point | None = None
+    region: BBox | None = None
+    note: str = ""
+    timestamp: datetime = Field(default_factory=_utcnow)
+
+    def log_summary(self) -> dict[str, Any]:
+        return {
+            "correction_id": self.correction_id,
+            "kind": self.kind.value,
+            "element_id": self.element_id,
+            "point": self.point.model_dump() if self.point else None,
+            "region": self.region.model_dump() if self.region else None,
+            "note": self.note[:80],
+        }
+
+
+class ActivityPhase(StrEnum):
+    """Visible privacy / activity indicator for the UI (Phase H)."""
+
+    IDLE = "idle"
+    CAPTURING = "capturing"
+    RECOGNIZING = "recognizing"
+    INFERRING = "inferring"
+    AWAITING_CONFIRM = "awaiting_confirm"
+    EXECUTING = "executing"
+    VERIFYING = "verifying"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+    ERROR = "error"
+
+
+class MetricsSnapshot(BaseModel):
+    """Latency + resource snapshot for the observability panel."""
+
+    protocol_version: str = PROTOCOL_VERSION
+    timestamp: datetime = Field(default_factory=_utcnow)
+    capture_latency_ms: float | None = None
+    vision_latency_ms: float | None = None
+    model_latency_ms: float | None = None
+    end_to_end_ms: float | None = None
+    queue_length: int = 0
+    queue_dropped: int = 0
+    cpu_percent: float | None = None
+    memory_rss_mb: float | None = None
+    memory_percent: float | None = None
+    gpu_name: str = ""
+    gpu_util_percent: float | None = None
+    gpu_mem_mb: float | None = None
+    recent_errors: list[str] = Field(default_factory=list)
+
+    def log_summary(self) -> dict[str, Any]:
+        return {
+            "capture_ms": self.capture_latency_ms,
+            "vision_ms": self.vision_latency_ms,
+            "model_ms": self.model_latency_ms,
+            "e2e_ms": self.end_to_end_ms,
+            "queue": self.queue_length,
+            "cpu": self.cpu_percent,
+            "rss_mb": self.memory_rss_mb,
+            "gpu": self.gpu_name or None,
+            "errors": self.recent_errors[:5],
+        }
+
+
+class ActivityStatus(BaseModel):
+    """What the assistant is doing right now (user-visible privacy cue)."""
+
+    protocol_version: str = PROTOCOL_VERSION
+    phase: ActivityPhase = ActivityPhase.IDLE
+    capturing: bool = False
+    recognizing: bool = False
+    inferring: bool = False
+    about_to_act: bool = False
+    executing: bool = False
+    message: str = ""
+    control_state: str = "running"  # running|paused|emergency_stop
+
+    def log_summary(self) -> dict[str, Any]:
+        return {
+            "phase": self.phase.value,
+            "capturing": self.capturing,
+            "recognizing": self.recognizing,
+            "inferring": self.inferring,
+            "about_to_act": self.about_to_act,
+            "executing": self.executing,
+            "message": self.message[:120],
+            "control_state": self.control_state,
+        }
+
+
 class TaskContext(BaseModel):
     protocol_version: str = PROTOCOL_VERSION
     task_id: str = Field(default_factory=lambda: _new_id("task"))
@@ -677,6 +784,8 @@ class TaskContext(BaseModel):
     confirmed: bool = False
     auto_confirmed: bool = False
     step_records: list[StepRecord] = Field(default_factory=list)
+    # Phase H: user corrections become structured task context
+    corrections: list[UserCorrection] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -701,6 +810,7 @@ class TaskContext(BaseModel):
             "pause_reason": self.pause_reason[:120] if self.pause_reason else "",
             "confirmed": self.confirmed,
             "auto_confirmed": self.auto_confirmed,
+            "correction_count": len(self.corrections),
         }
 
 
