@@ -15,6 +15,10 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER,
+    HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY, REG_EXPAND_SZ, REG_SZ,
+};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_MENU,
@@ -34,6 +38,17 @@ struct RuntimeState {
 
 struct ModelState {
     process: Mutex<Option<Child>>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstalledApp {
+    name: String,
+    version: Option<String>,
+    publisher: Option<String>,
+    install_location: Option<String>,
+    uninstall_command: Option<String>,
+    scope: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -429,6 +444,11 @@ fn get_runtime(state: State<'_, RuntimeState>) -> RuntimeSnapshot {
         .lock()
         .expect("runtime state poisoned")
         .clone()
+}
+
+#[tauri::command]
+fn get_installed_apps() -> Result<Vec<InstalledApp>, String> {
+    read_installed_apps()
 }
 
 #[tauri::command]
@@ -1647,6 +1667,156 @@ fn activate_window(target: &str) -> Result<(), String> {
     }
 }
 
+fn read_installed_apps() -> Result<Vec<InstalledApp>, String> {
+    let uninstall_key = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
+    let sources = [
+        (HKEY_LOCAL_MACHINE, "系统", KEY_WOW64_64KEY),
+        (HKEY_LOCAL_MACHINE, "系统 32 位", KEY_WOW64_32KEY),
+        (HKEY_CURRENT_USER, "当前用户", KEY_WOW64_64KEY),
+        (HKEY_CURRENT_USER, "当前用户 32 位", KEY_WOW64_32KEY),
+    ];
+    let mut apps = Vec::new();
+    for (root, scope, view) in sources {
+        enumerate_uninstall_key(root, uninstall_key, scope, view, &mut apps)?;
+    }
+    apps.sort_by_key(|app| app.name.to_lowercase());
+    apps.dedup_by(|left, right| {
+        left.name.eq_ignore_ascii_case(&right.name)
+            && left.version == right.version
+            && left.publisher == right.publisher
+    });
+    Ok(apps)
+}
+
+fn enumerate_uninstall_key(
+    root: HKEY,
+    path: &str,
+    scope: &str,
+    view: windows::Win32::System::Registry::REG_SAM_FLAGS,
+    apps: &mut Vec<InstalledApp>,
+) -> Result<(), String> {
+    unsafe {
+        let mut key = HKEY(0);
+        let result = RegOpenKeyExW(
+            root,
+            windows::core::PCWSTR(to_wide(path).as_ptr()),
+            0,
+            KEY_READ | view,
+            &mut key,
+        );
+        if result.0 == 2 {
+            return Ok(());
+        }
+        if result.0 != 0 {
+            return Err(format!("打开已安装应用注册表失败（{scope}）：{}", result.0));
+        }
+        let mut index = 0;
+        loop {
+            let mut name = vec![0u16; 256];
+            let mut length = name.len() as u32 - 1;
+            let result = RegEnumKeyExW(
+                key,
+                index,
+                windows::core::PWSTR(name.as_mut_ptr()),
+                &mut length,
+                None,
+                windows::core::PWSTR::null(),
+                None,
+                None,
+            );
+            if result.0 == 259 {
+                break;
+            }
+            if result.0 != 0 {
+                index += 1;
+                continue;
+            }
+            let subkey_name = String::from_utf16_lossy(&name[..length as usize]);
+            if let Some(app) = read_uninstall_entry(key, &subkey_name, scope, view) {
+                apps.push(app);
+            }
+            index += 1;
+        }
+        let _ = RegCloseKey(key);
+    }
+    Ok(())
+}
+
+unsafe fn read_uninstall_entry(
+    parent: HKEY,
+    subkey_name: &str,
+    scope: &str,
+    view: windows::Win32::System::Registry::REG_SAM_FLAGS,
+) -> Option<InstalledApp> {
+    let mut key = HKEY(0);
+    let subkey = to_wide(subkey_name);
+    if RegOpenKeyExW(
+        parent,
+        windows::core::PCWSTR(subkey.as_ptr()),
+        0,
+        KEY_READ | view,
+        &mut key,
+    )
+    .0 != 0
+    {
+        return None;
+    }
+    let name = read_registry_string(key, "DisplayName")?;
+    let app = InstalledApp {
+        name,
+        version: read_registry_string(key, "DisplayVersion"),
+        publisher: read_registry_string(key, "Publisher"),
+        install_location: read_registry_string(key, "InstallLocation"),
+        uninstall_command: read_registry_string(key, "UninstallString"),
+        scope: scope.into(),
+    };
+    let _ = RegCloseKey(key);
+    Some(app)
+}
+
+unsafe fn read_registry_string(key: HKEY, value_name: &str) -> Option<String> {
+    let value = to_wide(value_name);
+    let mut value_type = windows::Win32::System::Registry::REG_VALUE_TYPE(0);
+    let mut size = 0u32;
+    if RegQueryValueExW(
+        key,
+        windows::core::PCWSTR(value.as_ptr()),
+        None,
+        Some(&mut value_type),
+        None,
+        Some(&mut size),
+    )
+    .0 != 0
+        || !(value_type == REG_SZ || value_type == REG_EXPAND_SZ)
+        || size < 2
+    {
+        return None;
+    }
+    let mut data = vec![0u8; size as usize];
+    if RegQueryValueExW(
+        key,
+        windows::core::PCWSTR(value.as_ptr()),
+        None,
+        Some(&mut value_type),
+        Some(data.as_mut_ptr()),
+        Some(&mut size),
+    )
+    .0 != 0
+    {
+        return None;
+    }
+    let words = std::slice::from_raw_parts(data.as_ptr() as *const u16, size as usize / 2);
+    let result = String::from_utf16_lossy(words)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string();
+    (!result.is_empty()).then_some(result)
+}
+
+fn to_wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
 fn now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -1805,6 +1975,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_runtime,
+            get_installed_apps,
             get_model_config,
             set_model_config,
             run_task,

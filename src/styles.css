@@ -1837,6 +1837,41 @@ button:disabled:hover { transform: none; box-shadow: none; }
   background: linear-gradient(165deg, #171c25 0%, #12161d 100%);
   box-shadow: var(--shadow-3);
 }
+
+.settings-help {
+  margin: -4px 0 4px;
+  color: var(--muted, #89909b);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.installed-apps-section {
+  margin-top: 22px;
+}
+
+.installed-apps-list {
+  max-height: 280px;
+  overflow: auto;
+  margin-top: 12px;
+  border-top: 1px solid rgba(255,255,255,.08);
+}
+
+.installed-app-row {
+  display: grid;
+  gap: 3px;
+  padding: 9px 0;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+}
+
+.installed-app-row strong {
+  color: #e6e9ed;
+  font-size: 12px;
+}
+
+.installed-app-row span {
+  color: #89909b;
+  font-size: 11px;
+}
 .settings-form label {
   display: block;
   margin: 0 0 6px;

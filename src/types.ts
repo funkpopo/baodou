@@ -20,6 +20,15 @@ export interface ModelConfig {
   llamaUrl: string;
 }
 
+export interface InstalledApp {
+  name: string;
+  version?: string;
+  publisher?: string;
+  installLocation?: string;
+  uninstallCommand?: string;
+  scope: string;
+}
+
 export interface TaskEvent {
   taskId: string;
   phase: Phase;

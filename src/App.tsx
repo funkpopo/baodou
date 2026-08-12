@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { bridge } from "./bridge";
-import type { ModelConfig, RuntimeSnapshot, TaskEvent } from "./types";
+import type { InstalledApp, ModelConfig, RuntimeSnapshot, TaskEvent } from "./types";
 import {
   Activity, AlertTriangle, ArrowUp, Check, CircleStop, Cpu,
   Eye, FileText, History, Keyboard, LockKeyhole, Maximize2, MessageSquarePlus, Monitor,
@@ -40,6 +40,8 @@ function App() {
   const [mmprojPathDraft, setMmprojPathDraft] = useState("");
   const [llamaUrlDraft, setLlamaUrlDraft] = useState("");
   const [modelConfigMessage, setModelConfigMessage] = useState("");
+  const [installedApps, setInstalledApps] = useState<InstalledApp[]>([]);
+  const [installedAppsMessage, setInstalledAppsMessage] = useState("");
   const taskSubmissionLock = useRef(false);
   const archivedTaskIds = useRef(new Set<string>());
   const runtimeGoalRef = useRef<string | null>(null);
@@ -273,6 +275,10 @@ function App() {
               setLlamaUrlDraft={setLlamaUrlDraft}
               saveModelPath={saveModelPath}
               modelConfigMessage={modelConfigMessage}
+              installedApps={installedApps}
+              setInstalledApps={setInstalledApps}
+              installedAppsMessage={installedAppsMessage}
+              setInstalledAppsMessage={setInstalledAppsMessage}
             />
           )}
           {activePage === "history" && (
@@ -798,7 +804,20 @@ function SettingsPage(props: {
   mmprojPathDraft: string; setMmprojPathDraft: (value: string) => void;
   llamaUrlDraft: string; setLlamaUrlDraft: (value: string) => void;
   saveModelPath: () => void; modelConfigMessage: string;
+  installedApps: InstalledApp[]; setInstalledApps: (apps: InstalledApp[]) => void;
+  installedAppsMessage: string; setInstalledAppsMessage: (message: string) => void;
 }) {
+  async function loadInstalledApps() {
+    props.setInstalledAppsMessage("正在读取当前用户和系统应用清单…");
+    try {
+      const apps = await bridge.installedApps();
+      props.setInstalledApps(apps);
+      props.setInstalledAppsMessage(`已读取 ${apps.length} 个应用`);
+    } catch (cause) {
+      props.setInstalledAppsMessage(`读取失败：${String(cause)}`);
+    }
+  }
+
   return (
     <div className="settings-page">
       <div className="settings-heading">
@@ -817,6 +836,22 @@ function SettingsPage(props: {
         <input value={props.llamaUrlDraft} onChange={(event) => props.setLlamaUrlDraft(event.target.value)} />
         <button className="pressable" onClick={props.saveModelPath}>保存模型配置</button>
         {props.modelConfigMessage && <small>{props.modelConfigMessage}</small>}
+      </div>
+      <div className="settings-form installed-apps-section">
+        <label>已安装应用</label>
+        <p className="settings-help">读取 Windows 当前用户与系统卸载注册表；仅执行只读访问，不要求整个应用以管理员权限运行。</p>
+        <button className="pressable" onClick={() => void loadInstalledApps()}>读取应用列表</button>
+        {props.installedAppsMessage && <small>{props.installedAppsMessage}</small>}
+        {props.installedApps.length > 0 && (
+          <div className="installed-apps-list">
+            {props.installedApps.map((app) => (
+              <div className="installed-app-row" key={`${app.name}-${app.version ?? ""}-${app.scope}`}>
+                <strong>{app.name}</strong>
+                <span>{[app.version, app.publisher, app.scope].filter(Boolean).join(" · ")}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
