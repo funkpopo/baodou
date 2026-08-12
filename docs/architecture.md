@@ -1,64 +1,59 @@
-# Rust Desktop Architecture
+# 实时屏幕识别架构
 
-## Runtime boundary
-
-baodou has one product runtime:
+baodou 是只读的本地屏幕识别应用。前端不直接访问模型或操作系统；所有截图、模型调用和窗口管理都在 Rust 宿主中完成。
 
 ```text
-React/WebView UI
-    ↕ Tauri commands + task-event
-Rust desktop runtime
-    ├─ capture: xcap primary-monitor frames
-    ├─ inference: llama.cpp OpenAI-compatible HTTP endpoint
-    ├─ intent: dynamic foreground and visible-window resolution
-    ├─ planning: repeated observe-act-verify tagged-line protocol
-    ├─ actions: dynamic app launch, window activation, click, text and keyboard input
-    └─ lifecycle: task state, verification, pause and stop
+React 主窗口（启动 / 停止） ── typed Tauri IPC ──┐
+                                                ├─ Rust recognition loop
+React 悬浮精灵窗 ◀── floating-message ──────────┘  ├─ xcap：主显示器截图
+                                                   ├─ image：缩放至 960 × 540、PNG 编码
+                                                   ├─ reqwest：llama-server 视觉请求
+                                                   └─ 去重后推送主窗口和置顶悬浮窗
 ```
 
-`src/` never accesses the model endpoint or system input directly. `src-tauri/` is the sole authority for desktop APIs and Computer Use operations.
+## 交互模型
 
-## Protocol
+主窗口只提供一个 **启动 / 停止** 按钮：
 
-Protocol version is `1.0.0`.
+1. 点击启动后，Rust 以默认关注点开始识别循环，并立即显示系统级悬浮精灵窗；
+2. 识别结果通过 `floating-message` 推送到悬浮窗；
+3. 点击停止后，识别循环结束，悬浮窗自动关闭隐藏。
 
-Commands exposed to the WebView:
+主窗口不再包含任务对话框、侧栏或设置页。
 
-- `get_runtime`
-- `run_task`
-- `pause_runtime`
-- `stop_runtime`
+## 识别循环
 
-The Rust host emits `task-event` records for observation, planning, execution, verification, completion and errors. Event payloads use camelCase so the React types mirror the serialized Rust fields.
+运行时创建一个任务 ID，并在任务处于 `recognizing` 状态时循环：
 
-## Computer Use loop
+1. 采集主显示器画面；
+2. 缩放到 960 × 540，降低图像编码、传输和视觉 token 成本；
+3. 发送精简提示词、单张图片和最多 140 个输出 token；
+4. 仅接收不超过三句的屏幕内容描述；
+5. 若结果发生变化，广播给主窗口和系统级置顶悬浮窗；
+6. 补足到约 900ms 的目标采样间隔后进入下一帧。
 
-Each task runs for at most 12 rounds:
+该循环没有鼠标、键盘、前台窗口切换、应用启动、坐标解析或执行计划等能力。停止任务仅修改运行时状态，后续帧在开始前会检查该状态。
 
-1. capture the latest primary-monitor frame;
-2. enumerate the current foreground window and visible *actionable application* titles;
-3. ask the model to infer the target window from user intent and live inventory;
-4. execute one supported action when more work is needed;
-5. wait briefly and capture a new frame for verification.
+## 悬浮窗
 
-Click coordinates returned against the resized model image are mapped back to the physical display before input injection. A stop request is checked before every observation and again immediately before every action.
+Rust 在启动识别时创建标签为 `floating` 的独立 Webview 窗口。它无系统边框、透明、置顶、不显示在任务栏，和主窗口使用同一前端入口；前端根据窗口标签渲染为原版精灵形象与消息气泡。窗口可拖动；停止识别或点击关闭时隐藏。
 
-The runtime has no built-in application alias table. If the main planner omits an action, a separate intent-resolution request may select only a title present in the current window inventory. Invented or stale titles are rejected.
+## 便携式数据布局
 
-Installed application discovery is a separate read-only capability. The `get_installed_apps` command reads the per-user and machine-wide Windows uninstall registry keys in both 32-bit and 64-bit views and returns display name, version, publisher, install location, uninstall command, and source scope. It does not elevate the main process. Registry discovery is intentionally separate from Computer Use window targeting so an application inventory cannot become an implicit action allow-list.
+应用按 portable 方式组织数据，路径相对可执行文件目录：
 
-The inventory is observational rather than a hand-maintained allow/deny list: all titled visible top-level windows may be reported, including shell and utility surfaces. On the first round, a separate target-acquisition pass binds the user goal to either a real inventory title or a dynamic Windows Search query. It chooses a window only with positive task relevance; the main visual planner does not get to promote an arbitrary visible surface into a target. Every activation is then checked against the live inventory and verified by the resulting foreground HWND. `SetForegroundWindow` is only a request and its return value is not treated as proof of success. The native executor restores the window, temporarily attaches input threads when needed, brings it to the top, and polls the foreground HWND for a bounded interval before allowing the next action.
+```text
+<exe 所在目录>/
+  baodou.exe
+  data/
+    baodou.db      # 会话与设置数据库
+    config.json    # 模型与接口配置
+  model/           # 本地视觉模型（可随发行包一并分发）
+  llama-server.exe # 可选：同目录自带推理服务
+```
 
-An explicit launch verb in the user's task (`打开`, `启动`, or `运行`) is a stronger intent constraint than the current window inventory. In that case the harness extracts the application query from the task and starts that application directly; it does not ask the target-acquisition model to choose an arbitrary visible window first. This prevents a task such as “打开浏览器” from being redirected to a desktop or utility surface while still avoiding a system-window blacklist.
+后续可将数据库、配置与模型资源整合进单一发行目录或安装包，保证拷贝即用。
 
-Model generation is not constrained to JSON. The model protocol uses short `STATUS`, `OBSERVATION`, `ACTION`, `TARGET`, `TEXT`, and `EXPECTED` lines because small local vision models follow it more reliably.
+## 模型接口
 
-If no visible window matches but the goal clearly names an application, the intent resolver may return an `open_app` query. The executor opens Windows Search, enters that model-derived query, launches the result, and returns to the observation loop. Before non-window actions, the runtime compares the foreground window with the one captured during planning; a user focus change cancels that action and triggers a fresh observation. `Ctrl+Alt+Esc` is monitored natively as an emergency stop even when baodou is not focused.
-
-For local-model reliability, each request is intentionally limited to one action and a short tagged-line protocol. The model is given the live inventory and current foreground window, while the executor owns coordinate scaling, input injection, target validation, and completion verification. This keeps platform-sensitive behavior deterministic and avoids spending model tokens on a multi-step plan that may become stale after the first action.
-
-Text entry is modeled as a state transition rather than an unconditional append. The protocol supports `clear_search_bar` and `replace`; the latter performs select-all, deletion, and text entry as one executor-owned operation. This makes retries idempotent and prevents stale browser form contents from being concatenated with the new task query. Plain `input` remains available only for intentional append behavior.
-
-## Model endpoint
-
-The local visual model is accessed through an OpenAI-compatible llama-server endpoint. Set `BAODOU_LLAMA_URL` when its host or port differs from the configured default. The request carries the user goal and a PNG screen frame encoded as a data URL.
+本地视觉模型通过 OpenAI 兼容的 `POST /v1/chat/completions` 接口调用。模型提示明确限制为“描述可见内容”，并拒绝产生操作建议、步骤、坐标或动作协议。默认配置写入便携目录下的 `data/config.json`。

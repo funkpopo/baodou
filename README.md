@@ -1,20 +1,21 @@
 # baodou
 
-本地 AI 电脑操作助手，使用 Rust、Tauri 2、系统 WebView 和 React 构建。
+本地 AI 实时屏幕识别助手，使用 Rust、Tauri 2、系统 WebView 和 React 构建。
 
-桌面应用的在线运行路径完全由 Rust 承担：屏幕采集、图像编码、llama-server HTTP、任务状态、计划解析、风险门控与 Tauri IPC 均不依赖 Python。
+桌面应用的在线运行路径完全由 Rust 承担：屏幕采集、图像编码、llama-server HTTP、低延迟识别、悬浮窗推送与 Tauri IPC 均不依赖 Python。
 
 ## 技术结构
 
 ```text
-src/                 React + TypeScript 工作台 UI
-      ↕ typed Tauri command / task-event
-src-tauri/           Rust 桌面宿主与 Computer Use runtime
+src/                 React + TypeScript 启动台 / 悬浮精灵 UI
+      ↕ typed Tauri command / recognition-event
+src-tauri/           Rust 桌面宿主与实时识别 runtime
   ├─ xcap            屏幕采集
   ├─ image/base64    图像转换
   ├─ reqwest         llama-server 客户端
-  ├─ serde           结构化计划协议
-  └─ action loop     观察、决策、窗口激活、输入与结果验证
+  ├─ rusqlite        便携式本地数据库
+  └─ recognition loop 截屏、视觉识别、结果去重与悬浮窗刷新
+data/                运行后生成：config.json + baodou.db（相对 exe）
 model/               本地模型说明与元数据（模型权重不提交）
 docs/                架构、开发与运行文档
 ```
@@ -29,26 +30,40 @@ npm install
 npm run tauri:dev
 ```
 
-默认使用 `native computer use`：Rust 会反复采集主屏幕和动态窗口清单，由模型根据用户意图选择真实目标窗口；每轮生成并执行一个动作，再从新截图验证结果，直到目标完成或达到 12 步上限。
+主窗口只提供 **启动** 按钮。启动后：
 
-如果目标应用尚未显示，模型可以生成通用 `open_app` 动作，通过 Windows Search 启动应用。任务运行期间 Windows 前台会被 Computer Use 接管；可在任意应用中按 `Ctrl+Alt+Esc` 紧急中止。若用户主动切换前台窗口，待执行动作会被取消并重新规划。
+1. Rust 以默认关注点开始实时屏幕识别；
+2. 显示系统级独立、无边框、置顶且不出现在任务栏的悬浮精灵窗；
+3. 识别结果在精灵旁消息气泡中实时刷新；
+4. 点击 **停止** 后识别结束，悬浮窗自动隐藏。
 
-设置页提供“读取应用列表”功能。它只读合并 Windows 当前用户和系统的卸载注册表，并读取 32/64 位视图，不要求 baodou 整体以管理员身份运行。这样可以避免 UAC 提权改变桌面前台控制和 Computer Use 的输入行为；只有访问受保护安装目录等额外能力确实需要时，才应单独提权一个受限 helper。
-
-窗口清单是观察数据，不依赖固定的应用别名或系统窗口黑名单。任务开始时，独立的目标获取阶段会根据用户目标和实时窗口标题决定“绑定现有窗口”还是“通过 Windows Search 启动”；只有绑定后的窗口目标才能进入激活执行。切换窗口后，运行时会验证目标 HWND 确实成为前台窗口；Windows 的 `SetForegroundWindow` 返回值本身不作为成功依据。
+运行时不含鼠标、键盘、窗口激活、应用启动或其他电脑控制能力。
 
 ## 本地模型模式
 
-启动带视觉能力的 llama-server 后，在同一终端设置端点：
+将 `llama-server.exe` 与模型文件放在可执行文件同级目录（或按 `data/config.json` 中的路径配置），应用会自动尝试拉起本地视觉服务：
+
+```text
+<portable root>/
+  llama-server.exe
+  model/
+    Qwen3.5-2B-UD-Q4_K_XL.gguf
+    mmproj-F16.gguf
+  data/
+    config.json
+    baodou.db
+```
+
+也可在启动前手动指定接口：
 
 ```powershell
 $env:BAODOU_LLAMA_URL = "http://<host>:8765/v1/chat/completions"
 npm run tauri:dev
 ```
 
-应用会使用 Rust `reqwest` 直接发送屏幕 PNG 给 llama-server，每轮要求模型返回一个结构化动作或确认目标已经完成。动作可以先通过窗口标题激活其它 Windows 应用，再执行鼠标点击、文本输入或按键操作。baodou 本身会继续运行，任务状态和日志不会因目标窗口切换而丢失。
+## 便携式发行
 
-## 构建安装包
+数据库与配置保存在可执行文件旁的 `data/` 目录，便于整包拷贝分发。后续可将模型、配置与宿主整合进同一发行目录，形成 portable 应用。
 
 ```bat
 npm run build
@@ -57,7 +72,7 @@ npm run tauri:build
 
 Windows 产物位于：
 
-- `src-tauri/target/release/bundle/msi/`
+- `src-tauri/target/release/baodou.exe`
 - `src-tauri/target/release/bundle/nsis/`
 
 更多信息见 [docs/architecture.md](docs/architecture.md) 和 [docs/development.md](docs/development.md)。

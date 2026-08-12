@@ -13,23 +13,54 @@
     "windows": [
       {
         "label": "main",
-        "title": "baodou · 电脑操作助手",
-        "width": 1440,
-        "height": 900,
-        "minWidth": 1120,
-        "minHeight": 720,
+        "title": "baodou",
+        "width": 420,
+        "height": 560,
+        "minWidth": 360,
+        "minHeight": 480,
         "resizable": true,
         "decorations": false,
         "transparent": false,
-        "center": true
+        "skipTaskbar": false,
+        "center": true,
+        "visible": true,
+        "focus": true
+      },
+      {
+        "label": "floating",
+        "title": "baodou floating",
+        "url": "index.html?window=floating",
+        "width": 268,
+        "height": 148,
+        "minWidth": 220,
+        "minHeight": 120,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false,
+        "center": false
       }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": null
+    }
   },
   "bundle": {
     "active": true,
     "icon": ["icons/icon.ico"],
-    "targets": "all",
-    "windows": { "wix": { "language": "zh-CN" } }
+    "targets": ["nsis"],
+    "resources": [],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      },
+      "wix": {
+        "language": "zh-CN"
+      }
+    }
   }
 }

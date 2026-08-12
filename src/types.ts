@@ -1,4 +1,4 @@
-export type Phase = "idle" | "observing" | "planning" | "awaiting_user" | "executing" | "paused" | "stopped" | "completed" | "error";
+export type Phase = "idle" | "recognizing" | "stopped" | "error";
 
 export interface RuntimeSnapshot {
   protocolVersion: string;
@@ -20,16 +20,7 @@ export interface ModelConfig {
   llamaUrl: string;
 }
 
-export interface InstalledApp {
-  name: string;
-  version?: string;
-  publisher?: string;
-  installLocation?: string;
-  uninstallCommand?: string;
-  scope: string;
-}
-
-export interface TaskEvent {
+export interface RecognitionEvent {
   taskId: string;
   phase: Phase;
   title: string;
@@ -38,5 +29,7 @@ export interface TaskEvent {
   requiresConfirmation: boolean;
   complete: boolean;
   ok: boolean;
-  raw?: unknown;
 }
+
+export interface FloatingMessage { text: string; phase: Phase; updatedAt: string; }
+export interface SessionHistory { id: string; goal: string; latestResult: string; startedAt: string; updatedAt: string; }
