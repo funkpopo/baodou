@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CircleStop, Minimize2, Play, Sparkles, X } from "lucide-react";
 import { bridge } from "./bridge";
@@ -178,7 +178,30 @@ function FloatingApp() {
     updatedAt: "",
   });
   const [active, setActive] = useState(true);
+  const speechRef = useRef<HTMLDivElement>(null);
+  const messageBodyRef = useRef<HTMLParagraphElement>(null);
   const currentWindow = getCurrentWindow();
+
+  useLayoutEffect(() => {
+    // Let the new message paint first, then keep the newest recognition text
+    // visible and fit the native transparent window around the speech bubble.
+    const frame = window.requestAnimationFrame(() => {
+      const messageBody = messageBodyRef.current;
+      if (messageBody) {
+        messageBody.scrollTop = messageBody.scrollHeight;
+      }
+
+      const speech = speechRef.current;
+      if (speech) {
+        // The pet occupies the right edge; account for it when fitting the
+        // native transparent window to the naturally sized speech bubble.
+        const width = Math.ceil(speech.getBoundingClientRect().width + 98);
+        const height = Math.ceil(speech.getBoundingClientRect().height + 24);
+        void bridge.resizeFloating(width, height).catch(() => undefined);
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [message.text]);
 
   useEffect(() => {
     document.documentElement.classList.add("floating-mode");
@@ -239,7 +262,7 @@ function FloatingApp() {
   return (
     <main className={`floating-shell ${active ? "is-active" : ""}`} data-tauri-drag-region onMouseDown={dragWindow}>
       {/* Speech bubble sits outside the spirit body on a pure transparent canvas. */}
-      <div className="floating-speech" role="status" aria-live="polite">
+      <div ref={speechRef} className="floating-speech" role="status" aria-live="polite">
         <div className="floating-speech-meta">
           <span className={`status-pip ${active ? "live" : ""}`} />
           <strong>{active ? "识别中" : "已暂停"}</strong>
@@ -247,7 +270,7 @@ function FloatingApp() {
             <X size={11} />
           </button>
         </div>
-        <p>{message.text || "等待识别结果…"}</p>
+        <p ref={messageBodyRef}>{message.text || "等待识别结果…"}</p>
       </div>
 
       <div className="floating-pet" aria-hidden>

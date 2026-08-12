@@ -5,13 +5,12 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    env,
-    fs,
+    env, fs,
     io::Cursor,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tauri::{
     AppHandle, Emitter, LogicalPosition, Manager, Position, State, WebviewUrl, WebviewWindow,
@@ -22,12 +21,15 @@ use xcap::Monitor;
 
 const PROTOCOL_VERSION: &str = "2.0.0";
 const LLAMA_ENDPOINT: &str = "http://127.0.0.1:8765/v1/chat/completions";
-const SAMPLE_INTERVAL: Duration = Duration::from_millis(900);
 const DEFAULT_GOAL: &str = "描述当前屏幕上的关键可见内容";
 const FLOATING_LABEL: &str = "floating";
 /// Compact transparent pet window: speech bubble sits beside the spirit.
 const FLOATING_WIDTH: f64 = 268.0;
 const FLOATING_HEIGHT: f64 = 148.0;
+const FLOATING_MIN_WIDTH: f64 = 220.0;
+const FLOATING_MAX_WIDTH: f64 = 390.0;
+const FLOATING_MIN_HEIGHT: f64 = 120.0;
+const FLOATING_MAX_HEIGHT: f64 = 276.0;
 
 struct RuntimeState {
     snapshot: Mutex<RuntimeSnapshot>,
@@ -194,8 +196,36 @@ fn response_text(value: &serde_json::Value) -> Option<String> {
         collect_text(candidate, &mut pieces);
     }
 
-    let text = pieces.join("\n");
+    let text = strip_thinking(&pieces.join("\n"));
     (!text.is_empty()).then_some(text)
+}
+
+/// Model templates occasionally expose reasoning despite `/no_think`.
+/// Never show that private reasoning in the recognition UI or save it to the
+/// session history. Handles mixed-case, multiline, and incomplete tags.
+fn strip_thinking(text: &str) -> String {
+    let mut cleaned = String::with_capacity(text.len());
+    let mut rest = text;
+
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(start) = lower.find("<think>") else {
+            cleaned.push_str(rest);
+            break;
+        };
+
+        cleaned.push_str(&rest[..start]);
+        let after_open = &rest[start + "<think>".len()..];
+        let after_open_lower = after_open.to_ascii_lowercase();
+        let Some(end) = after_open_lower.find("</think>") else {
+            // An unfinished thinking block must not leak while a model is
+            // stopped or truncated before its closing tag.
+            break;
+        };
+        rest = &after_open[end + "</think>".len()..];
+    }
+
+    cleaned.trim().to_owned()
 }
 
 fn response_diagnostic(value: &serde_json::Value) -> String {
@@ -215,7 +245,7 @@ fn response_diagnostic(value: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod response_tests {
-    use super::response_text;
+    use super::{response_text, strip_thinking};
     use serde_json::json;
 
     #[test]
@@ -245,6 +275,15 @@ mod response_tests {
             Some("屏幕上有一个对话框。")
         );
     }
+
+    #[test]
+    fn removes_complete_and_incomplete_thinking_blocks() {
+        assert_eq!(
+            strip_thinking("<think>先分析图片\n再组织答案</think>屏幕上有一个浏览器。"),
+            "屏幕上有一个浏览器。"
+        );
+        assert_eq!(strip_thinking("可见结果。<THINK>不应显示"), "可见结果。");
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -264,7 +303,10 @@ fn now() -> String {
         .unwrap_or_default()
 }
 
-fn update_snapshot(state: &RuntimeState, update: impl FnOnce(&mut RuntimeSnapshot)) -> RuntimeSnapshot {
+fn update_snapshot(
+    state: &RuntimeState,
+    update: impl FnOnce(&mut RuntimeSnapshot),
+) -> RuntimeSnapshot {
     let mut snapshot = state.snapshot.lock().expect("runtime poisoned");
     update(&mut snapshot);
     snapshot.clone()
@@ -305,7 +347,9 @@ fn asset_root() -> PathBuf {
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     if let Some(project_root) = manifest_dir.parent() {
-        let project_model = project_root.join("model").join("Qwen3.5-2B-UD-Q4_K_XL.gguf");
+        let project_model = project_root
+            .join("model")
+            .join("Qwen3.5-2B-UD-Q4_K_XL.gguf");
         if project_model.exists() {
             return project_root.to_path_buf();
         }
@@ -390,12 +434,13 @@ fn persist_config_file(config: &ModelConfig) -> Result<(), String> {
 
 fn persist_model_config(config: &ModelConfig) -> Result<(), String> {
     persist_config_file(config)?;
-    database()?.execute(
-        "INSERT INTO settings (key, value) VALUES ('model_config', ?1)
+    database()?
+        .execute(
+            "INSERT INTO settings (key, value) VALUES ('model_config', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![serde_json::to_string(config).map_err(|e| e.to_string())?],
-    )
-    .map_err(|e| format!("配置保存失败：{e}"))?;
+            params![serde_json::to_string(config).map_err(|e| e.to_string())?],
+        )
+        .map_err(|e| format!("配置保存失败：{e}"))?;
     Ok(())
 }
 
@@ -568,6 +613,11 @@ fn recognize(endpoint: &str, query: &str, frame: &ScreenFrame) -> Result<String,
         // reasoning phase, leaving `content` empty and returning `length`.
         "temperature": 0.1,
         "max_tokens": 384,
+        // Each frame is an isolated, non-streaming observation. The complete
+        // response is received before another screen capture is started.
+        // Do not reuse a previous request's prompt/KV cache as visual context.
+        "cache_prompt": false,
+        "stream": false,
         "reasoning_format": "none",
         "chat_template_kwargs": { "enable_thinking": false },
         "messages": [{
@@ -652,7 +702,11 @@ fn get_portable_paths() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-fn run_task(app: AppHandle, state: State<'_, RuntimeState>, request: TaskRequest) -> Result<String, String> {
+fn run_task(
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
+    request: TaskRequest,
+) -> Result<String, String> {
     let goal = request
         .goal
         .as_deref()
@@ -663,11 +717,12 @@ fn run_task(app: AppHandle, state: State<'_, RuntimeState>, request: TaskRequest
 
     let id = Uuid::new_v4().to_string();
     let timestamp = now();
-    database()?.execute(
-        "INSERT INTO sessions (id, goal, started_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
-        params![id, goal, timestamp],
-    )
-    .map_err(|e| format!("无法保存会话：{e}"))?;
+    database()?
+        .execute(
+            "INSERT INTO sessions (id, goal, started_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+            params![id, goal, timestamp],
+        )
+        .map_err(|e| format!("无法保存会话：{e}"))?;
 
     update_snapshot(&state, |snapshot| {
         snapshot.mode = "live screen recognition".into();
@@ -690,7 +745,6 @@ fn recognition_loop(app: AppHandle, task_id: String, goal: String) {
     let mut last = String::new();
 
     while task_active(&app, &task_id) {
-        let started = Instant::now();
         match capture_primary().and_then(|frame| recognize(&endpoint, &goal, &frame)) {
             Ok(text) => {
                 update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
@@ -730,10 +784,10 @@ fn recognition_loop(app: AppHandle, task_id: String, goal: String) {
             }
         }
 
-        let elapsed = started.elapsed();
-        if elapsed < SAMPLE_INTERVAL {
-            std::thread::sleep(SAMPLE_INTERVAL - elapsed);
-        }
+        // `recognize` uses a non-streaming HTTP response, so control reaches
+        // here only after this frame's entire result has been generated and
+        // replaced in the floating bubble. The next iteration is therefore
+        // completion-driven rather than timer-driven.
     }
 }
 
@@ -767,7 +821,7 @@ fn ensure_floating_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     )
     .title("baodou")
     .inner_size(FLOATING_WIDTH, FLOATING_HEIGHT)
-    .min_inner_size(220.0, 120.0)
+    .min_inner_size(FLOATING_MIN_WIDTH, FLOATING_MIN_HEIGHT)
     .visible(false)
     .always_on_top(true)
     .decorations(false)
@@ -780,25 +834,31 @@ fn ensure_floating_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     .map_err(|e| format!("创建悬浮窗失败：{e}"))
 }
 
-fn position_floating_window(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> {
+fn position_floating_window(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
     let monitor = app
         .primary_monitor()
         .map_err(|e| e.to_string())?
-        .or_else(|| app.available_monitors().ok().and_then(|list| list.into_iter().next()))
+        .or_else(|| {
+            app.available_monitors()
+                .ok()
+                .and_then(|list| list.into_iter().next())
+        })
         .ok_or_else(|| "无法获取显示器信息".to_string())?;
 
     let scale = monitor.scale_factor();
     let screen = monitor.size();
     let work_w = screen.width as f64 / scale;
     let work_h = screen.height as f64 / scale;
-    let x = (work_w - FLOATING_WIDTH - 24.0).max(12.0);
-    let y = (work_h - FLOATING_HEIGHT - 56.0).max(12.0);
+    let x = (work_w - width - 24.0).max(12.0);
+    let y = (work_h - height - 56.0).max(12.0);
 
     window
-        .set_size(tauri::Size::Logical(tauri::LogicalSize::new(
-            FLOATING_WIDTH,
-            FLOATING_HEIGHT,
-        )))
+        .set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, height)))
         .map_err(|e| format!("设置悬浮窗尺寸失败：{e}"))?;
     window
         .set_position(Position::Logical(LogicalPosition::new(x, y)))
@@ -809,16 +869,22 @@ fn position_floating_window(app: &AppHandle, window: &WebviewWindow) -> Result<(
 #[tauri::command]
 fn show_floating_window(app: AppHandle) -> Result<(), String> {
     let window = ensure_floating_window(&app)?;
-    position_floating_window(&app, &window)?;
+    position_floating_window(&app, &window, FLOATING_WIDTH, FLOATING_HEIGHT)?;
     window
         .set_always_on_top(true)
         .map_err(|e| format!("置顶悬浮窗失败：{e}"))?;
-    window
-        .show()
-        .map_err(|e| format!("显示悬浮窗失败：{e}"))?;
+    window.show().map_err(|e| format!("显示悬浮窗失败：{e}"))?;
     // Keep the overlay above other windows without aggressively stealing keyboard focus.
     let _ = window.unminimize();
     Ok(())
+}
+
+#[tauri::command]
+fn resize_floating_window(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    let window = ensure_floating_window(&app)?;
+    let width = width.clamp(FLOATING_MIN_WIDTH, FLOATING_MAX_WIDTH);
+    let height = height.clamp(FLOATING_MIN_HEIGHT, FLOATING_MAX_HEIGHT);
+    position_floating_window(&app, &window, width, height)
 }
 
 #[tauri::command]
@@ -841,7 +907,12 @@ pub fn run() {
             // Ensure the floating webview is created at startup (hidden),
             // so show/hide later only toggles visibility.
             if let Ok(window) = ensure_floating_window(&app.handle()) {
-                let _ = position_floating_window(&app.handle(), &window);
+                let _ = position_floating_window(
+                    &app.handle(),
+                    &window,
+                    FLOATING_WIDTH,
+                    FLOATING_HEIGHT,
+                );
                 let _ = window.hide();
             }
 
@@ -859,7 +930,8 @@ pub fn run() {
             pause_runtime,
             stop_runtime,
             show_floating_window,
-            hide_floating_window
+            hide_floating_window,
+            resize_floating_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running baodou desktop");

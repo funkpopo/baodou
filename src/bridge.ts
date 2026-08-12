@@ -13,6 +13,7 @@ export const bridge = {
     invoke<{ root: string; dataDir: string; configPath: string; databasePath: string }>("get_portable_paths"),
   showFloating: () => invoke<void>("show_floating_window"),
   hideFloating: () => invoke<void>("hide_floating_window"),
+  resizeFloating: (width: number, height: number) => invoke<void>("resize_floating_window", { width, height }),
   onRecognition: (listener: (event: RecognitionEvent) => void): Promise<UnlistenFn> =>
     listen<RecognitionEvent>("recognition-event", (event) => listener(event.payload)),
   onFloating: (listener: (message: FloatingMessage) => void): Promise<UnlistenFn> =>

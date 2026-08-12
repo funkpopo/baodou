@@ -581,8 +581,11 @@ html.floating-mode #root {
   left: 6px;
   top: 50%;
   z-index: 4;
-  width: 148px;
-  max-height: 118px;
+  width: fit-content;
+  min-width: 128px;
+  max-width: 244px;
+  /* The shell height follows this bubble; only long message text scrolls. */
+  max-height: 252px;
   padding: 8px 10px 9px;
   border: 1.5px solid #e4fb78;
   border-radius: 14px 14px 14px 6px;
@@ -637,14 +640,28 @@ html.floating-mode #root {
 
 .floating-speech p {
   margin: 0;
-  max-height: 72px;
-  overflow: auto;
+  max-width: 244px;
+  max-height: 188px;
+  overflow-x: hidden;
+  overflow-y: auto;
   color: #1c2812;
   font-size: 11px;
   font-weight: 600;
   line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #40532688 transparent;
+}
+
+.floating-speech p::-webkit-scrollbar {
+  width: 4px;
+}
+
+.floating-speech p::-webkit-scrollbar-thumb {
+  border-radius: 99px;
+  background: #40532688;
 }
 
 .floating-close {
