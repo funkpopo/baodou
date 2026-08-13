@@ -16,7 +16,7 @@ const initialRuntime: RuntimeSnapshot = {
   modelReady: false,
   taskId: null,
   goal: null,
-  message: "本地屏幕识别运行时已就绪",
+  message: "Baodou 已在桌面旁陪伴，随时准备观察。",
 };
 
 function resolveWindowMode(): "main" | "floating" {
@@ -127,8 +127,8 @@ function MainApp() {
           <div className="brand-mark">
             <Sparkles size={14} />
           </div>
-          <span>baodou</span>
-          <small>PORTABLE</small>
+          <span>Baodou</span>
+          <small>DESKTOP COMPANION</small>
         </div>
         <div className="topbar-center">
           <span className={`traffic-dot ${runtime.modelReady ? "ready" : ""}`} />
@@ -161,8 +161,8 @@ function MainApp() {
           )}
           <p className="launch-hint">
             {active
-              ? "悬浮窗已显示，识别结果会实时刷新。"
-              : "启动后显示悬浮精灵，停止后自动隐藏。"}
+              ? "Baodou 正在陪你观察，结果会实时刷新。"
+              : "启动后 Baodou 会以悬浮精灵陪伴在桌面一侧。"}
           </p>
         </div>
       </section>
@@ -209,7 +209,7 @@ function FloatingApp() {
   useEffect(() => {
     document.documentElement.classList.add("floating-mode");
     document.body.classList.add("floating-mode");
-    document.title = "baodou floating";
+    document.title = "Baodou · Desktop Companion";
 
     let cleanupFloating: (() => void) | undefined;
     let cleanupRecognition: (() => void) | undefined;
@@ -301,7 +301,7 @@ function BotStage({
   detail: string;
 }) {
   const terminal = phase === "stopped" || phase === "error";
-  const caption = active ? "baodou 正在观察" : terminal ? (phase === "stopped" ? "识别已停止" : "需要处理") : "准备就绪";
+  const caption = active ? "Baodou 正在观察" : terminal ? (phase === "stopped" ? "识别已停止" : "需要处理") : "准备就绪";
   const sub = active
     ? "结果会同步到系统级悬浮窗"
     : terminal

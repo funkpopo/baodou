@@ -1,11 +1,10 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use image::{imageops::FilterType, DynamicImage, ImageFormat};
+use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, ImageFormat};
 use reqwest::blocking::Client;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    collections::VecDeque,
     env, fs,
     io::{BufRead, BufReader, Cursor},
     path::{Path, PathBuf},
@@ -33,10 +32,11 @@ const FLOATING_MIN_WIDTH: f64 = 248.0;
 const FLOATING_MAX_WIDTH: f64 = 420.0;
 const FLOATING_MIN_HEIGHT: f64 = 120.0;
 const FLOATING_MAX_HEIGHT: f64 = 276.0;
-const MAX_CONTEXT_TURNS: usize = 6;
-const SESSION_MEMORY_FILE: &str = "session-memory.json";
-/// Temporary crash-recovery cache only; normal stop deletes it.
-const SESSION_MEMORY_TTL_MILLIS: u128 = 12 * 60 * 60 * 1000;
+const CAPTURE_WIDTH: u32 = 768;
+const CAPTURE_HEIGHT: u32 = 432;
+const JPEG_QUALITY: u8 = 78;
+const TARGET_FRAME_INTERVAL: Duration = Duration::from_millis(900);
+const CHANGE_THRESHOLD: u32 = 7;
 const TRAY_SHOW_ID: &str = "show-main";
 const TRAY_EXIT_ID: &str = "quit";
 
@@ -45,27 +45,6 @@ struct RuntimeState {
 }
 struct ModelState {
     process: Mutex<Option<Child>>,
-}
-struct ContextState {
-    memory: Mutex<SessionMemory>,
-}
-
-/// A deliberately small, portable session memory. It is bounded by turn count
-/// and stored beside the executable, so it needs neither an account nor a
-/// platform-specific application-data directory.
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionMemory {
-    task_id: Option<String>,
-    goal: Option<String>,
-    updated_at: String,
-    turns: VecDeque<ConversationTurn>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct ConversationTurn {
-    user: String,
-    assistant: String,
 }
 impl Default for RuntimeState {
     fn default() -> Self {
@@ -78,13 +57,6 @@ impl Default for ModelState {
     fn default() -> Self {
         Self {
             process: Mutex::new(None),
-        }
-    }
-}
-impl Default for ContextState {
-    fn default() -> Self {
-        Self {
-            memory: Mutex::new(load_session_memory()),
         }
     }
 }
@@ -183,7 +155,7 @@ struct FloatingMessage {
 }
 
 struct ScreenFrame {
-    png_base64: String,
+    jpeg_base64: String,
 }
 
 /// Extract text from the response shapes used by OpenAI-compatible vision
@@ -486,60 +458,6 @@ fn config_path() -> Result<PathBuf, String> {
 
 fn database_path() -> Result<PathBuf, String> {
     Ok(data_dir()?.join("baodou.db"))
-}
-
-fn session_memory_path() -> Result<PathBuf, String> {
-    Ok(data_dir()?.join(SESSION_MEMORY_FILE))
-}
-
-fn memory_is_fresh(memory: &SessionMemory) -> bool {
-    memory
-        .updated_at
-        .parse::<u128>()
-        .ok()
-        .and_then(|updated_at| {
-            now()
-                .parse::<u128>()
-                .ok()
-                .map(|current| current.saturating_sub(updated_at))
-        })
-        .is_some_and(|age| age <= SESSION_MEMORY_TTL_MILLIS)
-}
-
-fn load_session_memory() -> SessionMemory {
-    let Ok(path) = session_memory_path() else {
-        return SessionMemory::default();
-    };
-    let Ok(raw) = fs::read_to_string(&path) else {
-        return SessionMemory::default();
-    };
-    let Ok(mut memory) = serde_json::from_str::<SessionMemory>(&raw) else {
-        return SessionMemory::default();
-    };
-
-    if memory.task_id.is_none() || !memory_is_fresh(&memory) {
-        let _ = fs::remove_file(path);
-        return SessionMemory::default();
-    }
-    while memory.turns.len() > MAX_CONTEXT_TURNS {
-        memory.turns.pop_front();
-    }
-    memory
-}
-
-fn persist_session_memory(memory: &SessionMemory) -> Result<(), String> {
-    let path = session_memory_path()?;
-    let raw = serde_json::to_string(memory).map_err(|e| e.to_string())?;
-    fs::write(path, raw).map_err(|e| format!("会话记忆写入失败：{e}"))
-}
-
-fn clear_session_memory(state: &ContextState) {
-    *state.memory.lock().expect("context poisoned") = SessionMemory::default();
-    if let Ok(path) = session_memory_path() {
-        // This cache is only for the active portable session. Ignore an absent
-        // file so normal stop remains idempotent.
-        let _ = fs::remove_file(path);
-    }
 }
 
 fn database() -> Result<Connection, String> {
@@ -845,7 +763,11 @@ fn supervise_model(app: AppHandle) {
     }
 }
 
-fn capture_primary() -> Result<ScreenFrame, String> {
+/// Captures the original screen into lossless PNG first, then downsamples and
+/// encodes the model input.  This preserves every source pixel through the
+/// capture/compression stage before resolution reduction determines the final
+/// inference budget.
+fn capture_primary() -> Result<(ScreenFrame, u64), String> {
     let monitor = Monitor::all()
         .map_err(|e| format!("枚举显示器失败：{e}"))?
         .into_iter()
@@ -854,19 +776,48 @@ fn capture_primary() -> Result<ScreenFrame, String> {
     let image = monitor
         .capture_image()
         .map_err(|e| format!("屏幕采集失败：{e}"))?;
-    let scaled = DynamicImage::ImageRgba8(image).resize(960, 540, FilterType::Triangle);
-    let mut png = Vec::new();
-    scaled
-        .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+    let original = DynamicImage::ImageRgba8(image);
+    let mut lossless_png = Vec::new();
+    original
+        .write_to(&mut Cursor::new(&mut lossless_png), ImageFormat::Png)
+        .map_err(|e| format!("无损截图压缩失败：{e}"))?;
+    let lossless = image::load_from_memory_with_format(&lossless_png, ImageFormat::Png)
+        .map_err(|e| format!("无损截图读取失败：{e}"))?;
+    let scaled = lossless.resize(CAPTURE_WIDTH, CAPTURE_HEIGHT, FilterType::Triangle);
+    let signature = frame_signature(&scaled);
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, JPEG_QUALITY)
+        .encode_image(&scaled)
         .map_err(|e| format!("图像编码失败：{e}"))?;
-    Ok(ScreenFrame {
-        png_base64: BASE64.encode(png),
-    })
+    Ok((
+        ScreenFrame {
+            jpeg_base64: BASE64.encode(jpeg),
+        },
+        signature,
+    ))
+}
+
+/// An 8 × 8 luminance fingerprint is intentionally inexpensive and robust to
+/// cursor blinking / minor animations.  It lets the loop skip inference for
+/// visually unchanged frames, which is the largest latency win in real use.
+fn frame_signature(image: &DynamicImage) -> u64 {
+    let small = image.resize_exact(8, 8, FilterType::Triangle).to_luma8();
+    let mean = small.pixels().map(|pixel| u32::from(pixel[0])).sum::<u32>() / 64;
+    small
+        .pixels()
+        .enumerate()
+        .fold(0_u64, |signature, (index, pixel)| {
+            signature | (u64::from(u32::from(pixel[0]) >= mean) << index)
+        })
+}
+
+fn signature_distance(left: u64, right: u64) -> u32 {
+    (left ^ right).count_ones()
 }
 
 fn recognition_prompt(query: &str) -> String {
     format!(
-        "/no_think\n你是实时屏幕识别助手。此消息附有一张刚刚截取的当前屏幕 PNG 图片，必须直接观察这张图片作答，不能只根据文字猜测。不要展示思考过程，直接给出最终识别结果。用户关注：{query}\n仅描述当前画面中与关注点最相关的可见信息。可以结合此前观察结果说明变化，但不要把此前内容当作当前画面的事实。不要建议点击、输入、打开、关闭或操作任何程序；不要输出步骤、坐标或 ACTION。用简洁中文回答，最多三句、120字。若图片不清晰或无法判断，直接说明原因。"
+        "/no_think\n你是 Baodou，一位常驻用户桌面的本地 AI 伴侣。你的气质温暖、沉稳、敏锐，像可靠的伙伴一样主动理解屏幕，但绝不虚构看不见的内容。此消息附有一张刚截取的屏幕图片，必须直接观察图片作答。用户当前关注：{query}\n用自然、友好的中文说明当前画面中相关的内容和变化；可以在必要时提醒值得注意的信息。不要给出点击、输入、打开、关闭等操作步骤，不要输出坐标或 ACTION。最多三句、120字；图片不清晰时坦诚说明。"
     )
 }
 
@@ -874,40 +825,35 @@ fn recognize(
     endpoint: &str,
     query: &str,
     frame: &ScreenFrame,
-    context: &[ConversationTurn],
     mut on_delta: impl FnMut(&str),
 ) -> Result<String, String> {
     let prompt = format!("{}\n当前截图：", recognition_prompt(query));
-    let mut messages = Vec::with_capacity(context.len() * 2 + 1);
-    for turn in context {
-        messages.push(json!({ "role": "user", "content": turn.user }));
-        messages.push(json!({ "role": "assistant", "content": turn.assistant }));
-    }
+    let mut messages = Vec::with_capacity(1);
     messages.push(json!({
         "role": "user",
         "content": [
             { "type": "text", "text": prompt },
             {
                 "type": "image_url",
-                "image_url": { "url": format!("data:image/png;base64,{}", frame.png_base64) }
+                "image_url": { "url": format!("data:image/jpeg;base64,{}", frame.jpeg_base64) }
             }
         ]
     }));
     let payload = json!({
         "model": "local-vision",
-        // Qwen can otherwise spend the entire 140-token budget in its hidden
+        // Qwen can otherwise spend its visible output budget in hidden
         // reasoning phase, leaving `content` empty and returning `length`.
         "temperature": 0.1,
         "max_tokens": 384,
-        // Context is bounded and retained only in memory for this task.
-        "cache_prompt": false,
+        // The static instruction prefix is reused on every frame by llama.cpp.
+        "cache_prompt": true,
         "stream": true,
         "reasoning_format": "none",
         "chat_template_kwargs": { "enable_thinking": false },
         "messages": messages
     });
 
-    let response = local_http_client(endpoint, Duration::from_secs(25))
+    let response = local_http_client(endpoint, Duration::from_secs(12))
         .map_err(|e| e.to_string())?
         .post(endpoint)
         .json(&payload)
@@ -927,8 +873,8 @@ fn recognize(
         if data == "[DONE]" {
             break;
         }
-        let chunk: serde_json::Value = serde_json::from_str(data)
-            .map_err(|e| format!("模型流式响应解析失败：{e}"))?;
+        let chunk: serde_json::Value =
+            serde_json::from_str(data).map_err(|e| format!("模型流式响应解析失败：{e}"))?;
         if let Some(delta) = stream_delta_text(&chunk) {
             raw_text.push_str(&delta);
             let cleaned = strip_thinking(&raw_text);
@@ -1025,27 +971,6 @@ fn run_task(
         snapshot.goal = Some(goal.clone());
         snapshot.message = "正在采集屏幕并识别".into();
     });
-    {
-        let context = app.state::<ContextState>();
-        let mut memory = context.memory.lock().expect("context poisoned");
-        // A previous active cache can only come from an interrupted run. Keep
-        // it for the same goal, so a portable app restart has just enough
-        // continuity without turning this into a cross-task history store.
-        let restored_turns =
-            if memory_is_fresh(&memory) && memory.goal.as_deref() == Some(goal.as_str()) {
-                memory.turns.clone()
-            } else {
-                VecDeque::new()
-            };
-        *memory = SessionMemory {
-            task_id: Some(id.clone()),
-            goal: Some(goal.clone()),
-            updated_at: timestamp,
-            turns: restored_turns,
-        };
-        persist_session_memory(&memory)?;
-    }
-
     show_floating_window(app.clone()).map_err(|e| format!("无法显示悬浮窗：{e}"))?;
     emit_floating(&app, "正在识别屏幕内容…", "recognizing");
 
@@ -1057,45 +982,45 @@ fn run_task(
 fn recognition_loop(app: AppHandle, task_id: String, goal: String) {
     let endpoint = load_model_config().llama_url;
     let mut last = String::new();
+    let mut previous_signature = None;
 
     while task_active(&app, &task_id) {
-        let context = {
-            let state = app.state::<ContextState>();
-            let turns = state
-                .memory
-                .lock()
-                .expect("context poisoned")
-                .turns
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>();
-            turns
+        let frame_started = std::time::Instant::now();
+        let captured = capture_primary();
+        let (frame, signature) = match captured {
+            Ok(frame) => frame,
+            Err(error) => {
+                update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+                    snapshot.message = error.clone();
+                });
+                emit_floating(&app, format!("识别暂不可用：{error}"), "error");
+                continue;
+            }
         };
-        match capture_primary().and_then(|frame| {
+
+        if previous_signature
+            .is_some_and(|previous| signature_distance(previous, signature) < CHANGE_THRESHOLD)
+        {
+            // Do not spend a full VLM request on a frame that has not
+            // materially changed.  Keep the displayed result stable instead.
+            let elapsed = frame_started.elapsed();
+            if elapsed < TARGET_FRAME_INTERVAL {
+                std::thread::sleep(TARGET_FRAME_INTERVAL - elapsed);
+            }
+            continue;
+        }
+        previous_signature = Some(signature);
+
+        match (|| {
             let app_for_delta = app.clone();
             let task_for_delta = task_id.clone();
-            recognize(&endpoint, &goal, &frame, &context, move |text| {
+            recognize(&endpoint, &goal, &frame, move |text| {
                 if task_active(&app_for_delta, &task_for_delta) {
                     emit_floating(&app_for_delta, text, "recognizing");
                 }
             })
-        }) {
+        })() {
             Ok(text) => {
-                {
-                    let state = app.state::<ContextState>();
-                    let mut memory = state.memory.lock().expect("context poisoned");
-                    if memory.task_id.as_deref() == Some(&task_id) {
-                        memory.turns.push_back(ConversationTurn {
-                            user: recognition_prompt(&goal),
-                            assistant: text.clone(),
-                        });
-                        while memory.turns.len() > MAX_CONTEXT_TURNS {
-                            memory.turns.pop_front();
-                        }
-                        memory.updated_at = now();
-                        let _ = persist_session_memory(&memory);
-                    }
-                }
                 update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
                     snapshot.model_ready = true;
                     snapshot.message = text.clone();
@@ -1136,8 +1061,13 @@ fn recognition_loop(app: AppHandle, task_id: String, goal: String) {
             }
         }
 
-        // The next frame begins after this stream finishes. Its visible text
-        // is already emitted incrementally while generation is in progress.
+        // A fixed lower bound prevents continuous back-to-back requests from
+        // saturating the local server.  Slow inference is never overlapped,
+        // so no stale-frame queue can build up.
+        let elapsed = frame_started.elapsed();
+        if elapsed < TARGET_FRAME_INTERVAL {
+            std::thread::sleep(TARGET_FRAME_INTERVAL - elapsed);
+        }
     }
 }
 
@@ -1148,7 +1078,6 @@ fn stop_runtime(app: AppHandle, state: State<'_, RuntimeState>) -> RuntimeSnapsh
         s.message = "已停止实时屏幕识别".into();
     });
     emit_floating(&app, "识别已暂停", "stopped");
-    clear_session_memory(app.state::<ContextState>().inner());
     let _ = hide_floating_window(app);
     snapshot
 }
@@ -1284,7 +1213,6 @@ pub fn run() {
     tauri::Builder::default()
         .manage(RuntimeState::default())
         .manage(ModelState::default())
-        .manage(ContextState::default())
         .setup(|app| {
             let _ = data_dir().map_err(|e| std::io::Error::other(e))?;
             let _ = database().map_err(|e| std::io::Error::other(e))?;
