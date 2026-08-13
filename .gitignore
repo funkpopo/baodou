@@ -11,7 +11,7 @@ src-tauri/gen/
 *.gguf
 *.ggufi
 model/
-model/**
+model/.gitattributes
 logs/
 artifacts/
 benchmarks/
@@ -29,6 +29,16 @@ benchmarks/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Build / temp
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.eslintcache
+
+# Desktop helper artifacts
+desktop/
 
 # Previous Python implementation caches. These files are not part of the project.
 __pycache__/
