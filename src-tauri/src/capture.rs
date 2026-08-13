@@ -16,7 +16,7 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use image::{
     codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, GrayImage, ImageBuffer, Luma,
-    RgbImage,
+    RgbImage, RgbaImage,
 };
 use xcap::Monitor;
 
@@ -69,23 +69,121 @@ impl ScreenFrame {
     }
 }
 
+/// Cached desktop pixels used to paint over Baodou windows so the model
+/// never sees the pet / bubble / launcher. The live grab keeps those
+/// windows visible to the user.
+pub struct DesktopBackdrop {
+    image: RgbaImage,
+    origin_x: i32,
+    origin_y: i32,
+}
+
+impl DesktopBackdrop {
+    /// Grabs the primary monitor while `hwnds` are DWM-cloaked. Call this
+    /// once before showing the floating window so the cloak never flickers
+    /// during the recognition loop.
+    pub fn capture_excluding(hwnds: &[isize]) -> Result<Self, String> {
+        let monitor = primary_monitor()?;
+        let origin_x = monitor.x().unwrap_or(0);
+        let origin_y = monitor.y().unwrap_or(0);
+        let image = {
+            let _cloak = WindowCloak::apply(hwnds);
+            monitor
+                .capture_image()
+                .map_err(|e| format!("屏幕采集失败：{e}"))?
+        };
+        Ok(Self {
+            image,
+            origin_x,
+            origin_y,
+        })
+    }
+
+    fn covers(&self, width: u32, height: u32) -> bool {
+        self.image.width() == width && self.image.height() == height
+    }
+
+    /// Paints cached desktop over each visible Baodou window, then stores the
+    /// cleaned frame so the next round can refresh pixels that are no longer
+    /// covered (window moved / resized / hidden).
+    fn refresh_and_paint(&mut self, frame: &mut RgbaImage, hwnds: &[isize]) {
+        self.paint_over(frame, hwnds);
+        self.image.clone_from(frame);
+    }
+
+    /// Copies the cached desktop into each visible Baodou window rectangle.
+    fn paint_over(&self, frame: &mut RgbaImage, hwnds: &[isize]) {
+        let frame_w = frame.width() as i32;
+        let frame_h = frame.height() as i32;
+        for hwnd in hwnds.iter().copied().filter(|hwnd| *hwnd != 0) {
+            let Some(rect) = visible_window_rect(hwnd) else {
+                continue;
+            };
+            let x0 = (rect.0 - self.origin_x).max(0);
+            let y0 = (rect.1 - self.origin_y).max(0);
+            let x1 = (rect.2 - self.origin_x).min(frame_w);
+            let y1 = (rect.3 - self.origin_y).min(frame_h);
+            if x0 >= x1 || y0 >= y1 {
+                continue;
+            }
+            blit_rect(
+                frame,
+                &self.image,
+                x0 as u32,
+                y0 as u32,
+                (x1 - x0) as u32,
+                (y1 - y0) as u32,
+            );
+        }
+    }
+}
+
 /// Captures the primary monitor, downsamples in memory and computes both
 /// change-detection grids.  There is intentionally no PNG round-trip here:
 /// the JPEG for the model is encoded directly from the in-memory downsample.
 ///
-/// On Windows this uses Graphics Capture (`xcap` `wgc` feature). Combined with
-/// `WDA_EXCLUDEFROMCAPTURE` on Baodou's own HWNDs, the pet / bubble / launcher
-/// are omitted and the desktop behind them is what the model sees.
+/// On Windows this uses Graphics Capture (`xcap` `wgc` feature). The live
+/// grab leaves Baodou windows painted; [`capture_primary_excluding`] then
+/// stamps a pre-captured desktop backdrop over those HWNDs so the pet /
+/// bubble / launcher do not appear in the recognition frame. WebView2
+/// cannot stay painted under `WDA_EXCLUDEFROMCAPTURE`, so that flag is
+/// not used, and DWM cloak is only applied while seeding the backdrop.
 pub fn capture_primary() -> Result<CapturedFrame, String> {
-    let monitor = Monitor::all()
+    frame_from_rgba(grab_primary()?)
+}
+
+/// Same as [`capture_primary`], but paints `backdrop` over `hwnds` so those
+/// windows stay on screen for the user while the model sees the desktop
+/// behind them.
+pub fn capture_primary_excluding(
+    hwnds: &[isize],
+    backdrop: Option<&mut DesktopBackdrop>,
+) -> Result<CapturedFrame, String> {
+    let Some(backdrop) = backdrop else {
+        return capture_primary();
+    };
+    let mut image = grab_primary()?;
+    if backdrop.covers(image.width(), image.height()) {
+        backdrop.refresh_and_paint(&mut image, hwnds);
+    }
+    frame_from_rgba(image)
+}
+
+fn primary_monitor() -> Result<Monitor, String> {
+    Monitor::all()
         .map_err(|e| format!("枚举显示器失败：{e}"))?
         .into_iter()
         .find(|m| m.is_primary().unwrap_or(false))
-        .ok_or_else(|| "没有检测到主显示器".to_string())?;
-    let image = monitor
-        .capture_image()
-        .map_err(|e| format!("屏幕采集失败：{e}"))?;
+        .ok_or_else(|| "没有检测到主显示器".to_string())
+}
 
+fn grab_primary() -> Result<RgbaImage, String> {
+    primary_monitor()?
+        .capture_image()
+        .map_err(|e| format!("屏幕采集失败：{e}"))
+}
+
+fn frame_from_rgba(image: RgbaImage) -> Result<CapturedFrame, String> {
     let source = DynamicImage::ImageRgba8(image);
     let thumb = source
         .resize(CAPTURE_WIDTH, CAPTURE_HEIGHT, FilterType::Triangle)
@@ -100,6 +198,116 @@ pub fn capture_primary() -> Result<CapturedFrame, String> {
         coarse: partition_signatures(&gray, COARSE_COLS, COARSE_ROWS),
         fine: partition_signatures(&gray, FINE_COLS, FINE_ROWS),
     })
+}
+
+fn blit_rect(dst: &mut RgbaImage, src: &RgbaImage, x: u32, y: u32, width: u32, height: u32) {
+    let max_w = dst.width().min(src.width());
+    let max_h = dst.height().min(src.height());
+    if x >= max_w || y >= max_h {
+        return;
+    }
+    let width = width.min(max_w - x);
+    let height = height.min(max_h - y);
+    for row in y..y + height {
+        let dst_start = ((row * dst.width() + x) * 4) as usize;
+        let src_start = ((row * src.width() + x) * 4) as usize;
+        let len = (width * 4) as usize;
+        dst.as_mut()[dst_start..dst_start + len]
+            .copy_from_slice(&src.as_raw()[src_start..src_start + len]);
+    }
+}
+
+/// Temporarily cloaks HWNDs via `DWMWA_CLOAK`. Used only while seeding
+/// [`DesktopBackdrop`] so the first grab does not contain Baodou chrome.
+/// Cloaked windows leave DWM composition (and therefore WGC / DXGI frames)
+/// but keep their WebView2 swapchain intact; dropping restores them.
+struct WindowCloak {
+    hwnds: Vec<isize>,
+}
+
+impl WindowCloak {
+    fn apply(hwnds: &[isize]) -> Self {
+        let hwnds: Vec<isize> = hwnds.iter().copied().filter(|hwnd| *hwnd != 0).collect();
+        for hwnd in &hwnds {
+            set_cloaked(*hwnd, true);
+        }
+        if !hwnds.is_empty() {
+            flush_dwm();
+        }
+        Self { hwnds }
+    }
+}
+
+impl Drop for WindowCloak {
+    fn drop(&mut self) {
+        for hwnd in &self.hwnds {
+            set_cloaked(*hwnd, false);
+        }
+        if !self.hwnds.is_empty() {
+            flush_dwm();
+        }
+    }
+}
+
+#[cfg(windows)]
+fn set_cloaked(hwnd: isize, cloak: bool) {
+    use windows::Win32::{
+        Foundation::HWND,
+        Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK},
+    };
+
+    let value: i32 = i32::from(cloak);
+    let handle = HWND(hwnd as *mut core::ffi::c_void);
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            handle,
+            DWMWA_CLOAK,
+            std::ptr::from_ref(&value).cast(),
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn set_cloaked(_hwnd: isize, _cloak: bool) {}
+
+#[cfg(windows)]
+fn flush_dwm() {
+    use windows::Win32::Graphics::Dwm::DwmFlush;
+    unsafe {
+        let _ = DwmFlush();
+    }
+}
+
+#[cfg(not(windows))]
+fn flush_dwm() {}
+
+/// Screen-space bounds of a visible, non-minimized HWND as
+/// `(left, top, right, bottom)`.
+#[cfg(windows)]
+fn visible_window_rect(hwnd: isize) -> Option<(i32, i32, i32, i32)> {
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{GetWindowRect, IsIconic, IsWindowVisible},
+    };
+
+    let handle = HWND(hwnd as *mut core::ffi::c_void);
+    unsafe {
+        if !IsWindowVisible(handle).as_bool() || IsIconic(handle).as_bool() {
+            return None;
+        }
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        GetWindowRect(handle, &mut rect).ok()?;
+        if rect.right <= rect.left || rect.bottom <= rect.top {
+            return None;
+        }
+        Some((rect.left, rect.top, rect.right, rect.bottom))
+    }
+}
+
+#[cfg(not(windows))]
+fn visible_window_rect(_hwnd: isize) -> Option<(i32, i32, i32, i32)> {
+    None
 }
 
 impl CapturedFrame {
@@ -330,6 +538,17 @@ mod tests {
             bbox.0 >= 200 && bbox.0 <= 400,
             "crop lands near the moved block"
         );
+    }
+
+    #[test]
+    fn blit_rect_copies_overlapping_block() {
+        let mut dst = RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]));
+        let src = RgbaImage::from_pixel(8, 8, image::Rgba([9, 8, 7, 255]));
+        blit_rect(&mut dst, &src, 2, 3, 3, 2);
+        assert_eq!(dst.get_pixel(2, 3), src.get_pixel(2, 3));
+        assert_eq!(dst.get_pixel(4, 4), src.get_pixel(4, 4));
+        assert_eq!(*dst.get_pixel(1, 3), image::Rgba([1, 2, 3, 255]));
+        assert_eq!(*dst.get_pixel(2, 2), image::Rgba([1, 2, 3, 255]));
     }
 
     #[test]

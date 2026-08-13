@@ -24,8 +24,7 @@
         "skipTaskbar": false,
         "center": true,
         "visible": true,
-        "focus": true,
-        "contentProtected": true
+        "focus": true
       },
       {
         "label": "floating",
@@ -45,8 +44,7 @@
         "skipTaskbar": true,
         "visible": false,
         "focus": false,
-        "center": false,
-        "contentProtected": true
+        "center": false
       }
     ],
     "security": {
