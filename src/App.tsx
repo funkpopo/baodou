@@ -178,11 +178,12 @@ function MainApp() {
 
 function FloatingApp() {
   const [message, setMessage] = useState<FloatingMessage>({
-    text: "正在识别屏幕内容…",
+    text: "",
     phase: "recognizing",
     updatedAt: "",
   });
   const [active, setActive] = useState(true);
+  const shellRef = useRef<HTMLElement>(null);
   const speechRef = useRef<HTMLDivElement>(null);
   const messageBodyRef = useRef<HTMLParagraphElement>(null);
   const currentWindow = getCurrentWindow();
@@ -214,12 +215,12 @@ function FloatingApp() {
 
       const speech = speechRef.current;
       if (speech) {
-        // The right side is a dedicated, non-overlapping lane for the pet.
-        // Keep that lane in the native window measurement as well, otherwise
-        // a wide bubble can grow beneath the spirit after a message refresh.
-        const petSafeLane = 112;
-        const width = Math.ceil(speech.getBoundingClientRect().width + petSafeLane + 8);
-        const height = Math.ceil(Math.max(speech.getBoundingClientRect().height, 96) + 24);
+        // The spirit stays pinned to the right. Measure the bubble's own
+        // box (not a transformed rect) and grow/shrink the canvas leftward.
+        const speechRight = Number.parseFloat(getComputedStyle(speech).right) || 104;
+        const leftPad = 8;
+        const width = Math.ceil(speech.offsetWidth + speechRight + leftPad);
+        const height = Math.ceil(Math.max(speech.offsetHeight, 96) + 24);
         pendingSizeRef.current = { width, height };
         if (resizeTimerRef.current == null) {
           resizeTimerRef.current = window.setTimeout(applyPendingResize, 180);
@@ -268,7 +269,9 @@ function FloatingApp() {
       });
     void bridge.runtime().then((runtime) => {
       setActive(runtime.phase === "recognizing");
-      if (runtime.message) {
+      // A recognition round starts without a placeholder message.  The
+      // bubble should only contain model output once it is available.
+      if (runtime.message && runtime.phase !== "recognizing") {
         setMessage((current) => ({
           ...current,
           text: runtime.message,
@@ -296,18 +299,25 @@ function FloatingApp() {
   }
 
   return (
-    <main className={`floating-shell ${active ? "is-active" : ""}`} data-tauri-drag-region onMouseDown={dragWindow}>
+    <main
+      ref={shellRef}
+      className={`floating-shell ${active ? "is-active" : ""}`}
+      data-tauri-drag-region
+      onMouseDown={dragWindow}
+    >
       {/* Speech bubble sits outside the spirit body on a pure transparent canvas. */}
-      <div ref={speechRef} className="floating-speech" role="status" aria-live="polite">
-        <div className="floating-speech-meta">
-          <span className={`status-pip ${active ? "live" : ""}`} />
-          <strong>{active ? "识别中" : "已暂停"}</strong>
-          <button className="floating-close" onClick={() => void hide()} aria-label="隐藏悬浮窗">
-            <X size={11} />
-          </button>
+      {message.text && (
+        <div ref={speechRef} className="floating-speech" role="status" aria-live="polite">
+          <div className="floating-speech-meta">
+            <span className={`status-pip ${active ? "live" : ""}`} />
+            <strong>{active ? "识别中" : "已暂停"}</strong>
+            <button className="floating-close" onClick={() => void hide()} aria-label="隐藏悬浮窗">
+              <X size={11} />
+            </button>
+          </div>
+          <p ref={messageBodyRef}>{message.text}</p>
         </div>
-        <p ref={messageBodyRef}>{message.text || "等待识别结果…"}</p>
-      </div>
+      )}
 
       <div className="floating-pet" aria-hidden>
         <div className="bot-orbit orbit-one" />

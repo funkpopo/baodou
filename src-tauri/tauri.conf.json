@@ -32,7 +32,7 @@
         "url": "index.html?window=floating",
         "width": 282,
         "height": 148,
-        "minWidth": 248,
+        "minWidth": 216,
         "minHeight": 120,
         "resizable": false,
         "decorations": false,

@@ -576,19 +576,22 @@ html.floating-mode #root {
 }
 
 /*
- * The pet owns the right-most 112px of the transparent canvas.  Pinning the
- * speech bubble's right edge before that lane makes the separation hold at
- * every dynamic window width, rather than relying on an approximate offset.
+ * The pet stays on the right. The bubble is right-aligned against that lane
+ * and sizes to its message, so short text closes toward the spirit and long
+ * text grows left without leaving a gap.
  */
 .floating-speech {
   position: absolute;
-  left: 8px;
-  right: 112px;
+  right: 104px;
+  left: auto;
   top: 50%;
   z-index: 4;
-  width: auto;
-  min-width: 128px;
-  max-width: min(324px, calc(100% - 120px));
+  /* Size from the message's natural (unwrapped) width. `fit-content` together
+     with `overflow-wrap:anywhere` can collapse to a one-character column;
+     `max-content` grows first and only wraps once the cap is reached. */
+  width: max-content;
+  box-sizing: border-box;
+  max-width: 360px;
   /* Prefer growing the transparent shell so a complete result is visible;
      scrolling is only a fallback for unusually long model output. */
   max-height: 396px;
@@ -646,6 +649,7 @@ html.floating-mode #root {
 
 .floating-speech p {
   margin: 0;
+  width: max-content;
   max-width: 100%;
   max-height: 332px;
   overflow-x: hidden;
@@ -690,8 +694,10 @@ html.floating-mode #root {
 /* Compact spirit pet — no panel, no mask. */
 .floating-pet {
   position: absolute;
+  left: auto;
   right: 8px;
   top: 50%;
+  /* Keep the companion visibly behind the speech bubble and its text. */
   z-index: 2;
   width: 96px;
   height: 96px;
@@ -702,6 +708,7 @@ html.floating-mode #root {
   perspective: 700px;
   background: transparent;
 }
+
 
 .floating-pet .bot-orbit {
   left: 50%;
