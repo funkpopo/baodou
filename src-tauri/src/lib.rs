@@ -284,6 +284,74 @@ mod response_tests {
         );
         assert_eq!(strip_thinking("可见结果。<THINK>不应显示"), "可见结果。");
     }
+
+    #[test]
+    fn builds_health_url_from_chat_completions_endpoint() {
+        assert_eq!(
+            super::llama_health_url("http://127.0.0.1:8765/v1/chat/completions").as_deref(),
+            Some("http://127.0.0.1:8765/health")
+        );
+        assert_eq!(super::llama_health_url("").as_deref(), None);
+    }
+
+    #[test]
+    fn treats_local_llama_url_as_loopback() {
+        assert!(super::is_loopback_endpoint(
+            "http://127.0.0.1:8765/v1/chat/completions"
+        ));
+        assert!(super::is_loopback_endpoint(
+            "http://localhost:8765/v1/chat/completions"
+        ));
+        assert!(!super::is_loopback_endpoint(
+            "http://10.0.0.8:8765/v1/chat/completions"
+        ));
+    }
+
+    #[test]
+    fn loopback_health_check_ignores_http_proxy() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback health fixture");
+        let addr = listener.local_addr().expect("local addr");
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0_u8; 256];
+                let _ = stream.read(&mut buffer);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}");
+            }
+        });
+
+        let previous: Vec<(&str, Option<String>)> = [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+        ]
+        .into_iter()
+        .map(|key| (key, std::env::var(key).ok()))
+        .collect();
+
+        std::env::set_var("HTTP_PROXY", "http://127.0.0.1:9");
+        std::env::set_var("http_proxy", "http://127.0.0.1:9");
+        std::env::set_var("HTTPS_PROXY", "http://127.0.0.1:9");
+        std::env::set_var("https_proxy", "http://127.0.0.1:9");
+
+        let endpoint = format!("http://{addr}/v1/chat/completions");
+        let ready = super::llama_health(&endpoint);
+
+        for (key, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        assert!(ready);
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -485,28 +553,105 @@ fn stop_model(app: &AppHandle) {
     }
 }
 
-fn llama_health(endpoint: &str) -> bool {
-    let url = endpoint
+fn is_loopback_endpoint(endpoint: &str) -> bool {
+    let host_port = endpoint
+        .split("://")
+        .nth(1)
+        .unwrap_or(endpoint)
+        .split('/')
+        .next()
+        .unwrap_or("");
+    host_port.starts_with("127.0.0.1")
+        || host_port.starts_with("localhost")
+        || host_port.starts_with("[::1]")
+        || host_port == "::1"
+}
+
+/// Loopback llama-server traffic must never inherit HTTP(S)_PROXY. A system
+/// proxy on 127.0.0.1 (common with clash/v2ray) returns 502 for
+/// `http://127.0.0.1:8765/health` and leaves the UI stuck on 模型未就绪.
+fn local_http_client(endpoint: &str, timeout: Duration) -> Result<Client, reqwest::Error> {
+    let mut builder = Client::builder().timeout(timeout);
+    if is_loopback_endpoint(endpoint) {
+        builder = builder.no_proxy();
+    }
+    builder.build()
+}
+
+fn llama_health_url(endpoint: &str) -> Option<String> {
+    endpoint
         .split("/v1/")
         .next()
-        .map(|s| format!("{s}/health"))
-        .unwrap_or_default();
-    Client::builder()
-        .timeout(Duration::from_millis(600))
-        .build()
+        .filter(|base| !base.is_empty())
+        .map(|base| format!("{base}/health"))
+}
+
+fn llama_health(endpoint: &str) -> bool {
+    let Some(url) = llama_health_url(endpoint) else {
+        return false;
+    };
+    local_http_client(endpoint, Duration::from_secs(2))
         .ok()
         .and_then(|client| client.get(url).send().ok())
         .map(|response| response.status().is_success())
         .unwrap_or(false)
 }
 
+fn mark_model_ready(app: &AppHandle, message: &str) {
+    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+        snapshot.model_ready = true;
+        snapshot.message = message.into();
+    });
+}
+
+fn mark_model_not_ready(app: &AppHandle, message: impl Into<String>) {
+    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+        snapshot.model_ready = false;
+        snapshot.message = message.into();
+    });
+}
+
+fn model_process_alive(app: &AppHandle) -> bool {
+    let state = app.state::<ModelState>();
+    let mut guard = state.process.lock().expect("model poisoned");
+    match guard.as_mut() {
+        Some(child) => match child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) => {
+                *guard = None;
+                false
+            }
+            Err(_) => false,
+        },
+        None => false,
+    }
+}
+
+fn wait_for_model(app: &AppHandle, endpoint: &str, attempts: u32) -> bool {
+    for _ in 0..attempts {
+        if llama_health(endpoint) {
+            mark_model_ready(app, "本地视觉模型已就绪");
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    false
+}
+
 fn start_model(app: AppHandle) {
     let config = load_model_config();
     if llama_health(&config.llama_url) {
+        mark_model_ready(&app, "本地视觉模型已连接");
+        return;
+    }
+
+    if model_process_alive(&app) {
         update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
-            snapshot.model_ready = true;
-            snapshot.message = "本地视觉模型已连接".into();
+            if !snapshot.model_ready {
+                snapshot.message = "正在等待本地视觉模型就绪…".into();
+            }
         });
+        let _ = wait_for_model(&app, &config.llama_url, 90);
         return;
     }
 
@@ -514,12 +659,13 @@ fn start_model(app: AppHandle) {
     let model = PathBuf::from(&config.model_path);
     let mmproj = PathBuf::from(&config.mmproj_path);
     if !server.exists() || !model.exists() || !mmproj.exists() {
-        update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
-            snapshot.message = format!(
+        mark_model_not_ready(
+            &app,
+            format!(
                 "本地模型未就绪：请将 llama-server 与 model 放在 {}",
                 portable_root().display()
-            );
-        });
+            ),
+        );
         return;
     }
 
@@ -534,6 +680,11 @@ fn start_model(app: AppHandle) {
     let mut parts = host_port.rsplitn(2, ':');
     let port = parts.next().unwrap_or("8765");
     let host = parts.next().unwrap_or("127.0.0.1");
+
+    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+        snapshot.model_ready = false;
+        snapshot.message = "正在启动本地视觉模型…".into();
+    });
 
     match Command::new(&server)
         .current_dir(server.parent().unwrap_or_else(|| Path::new(".")))
@@ -565,22 +716,41 @@ fn start_model(app: AppHandle) {
                 .process
                 .lock()
                 .expect("model poisoned") = Some(child);
-            for _ in 0..45 {
-                if llama_health(&config.llama_url) {
-                    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
-                        snapshot.model_ready = true;
-                        snapshot.message = "本地视觉模型已就绪".into();
-                    });
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(400));
+            if !wait_for_model(&app, &config.llama_url, 90) {
+                mark_model_not_ready(
+                    &app,
+                    "本地模型启动超时：推理服务未在预期时间内就绪",
+                );
             }
         }
         Err(error) => {
-            update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
-                snapshot.message = format!("模型启动失败：{error}");
-            });
+            mark_model_not_ready(&app, format!("模型启动失败：{error}"));
         }
+    }
+}
+
+fn supervise_model(app: AppHandle) {
+    start_model(app.clone());
+    loop {
+        std::thread::sleep(Duration::from_secs(2));
+        let config = load_model_config();
+        if llama_health(&config.llama_url) {
+            update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+                if !snapshot.model_ready {
+                    snapshot.model_ready = true;
+                    snapshot.message = "本地视觉模型已就绪".into();
+                }
+            });
+            continue;
+        }
+
+        update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+            if snapshot.model_ready {
+                snapshot.model_ready = false;
+                snapshot.message = "本地视觉模型连接已断开，正在重试…".into();
+            }
+        });
+        start_model(app.clone());
     }
 }
 
@@ -634,9 +804,7 @@ fn recognize(endpoint: &str, query: &str, frame: &ScreenFrame) -> Result<String,
         }]
     });
 
-    let response: serde_json::Value = Client::builder()
-        .timeout(Duration::from_secs(25))
-        .build()
+    let response: serde_json::Value = local_http_client(endpoint, Duration::from_secs(25))
         .map_err(|e| e.to_string())?
         .post(endpoint)
         .json(&payload)
@@ -917,7 +1085,7 @@ pub fn run() {
             }
 
             let handle = app.handle().clone();
-            std::thread::spawn(move || start_model(handle));
+            std::thread::spawn(move || supervise_model(handle));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
