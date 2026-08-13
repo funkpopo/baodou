@@ -7,7 +7,7 @@ use serde_json::json;
 use std::{
     collections::VecDeque,
     env, fs,
-    io::Cursor,
+    io::{BufRead, BufReader, Cursor},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
@@ -27,13 +27,16 @@ const LLAMA_ENDPOINT: &str = "http://127.0.0.1:8765/v1/chat/completions";
 const DEFAULT_GOAL: &str = "描述当前屏幕上的关键可见内容";
 const FLOATING_LABEL: &str = "floating";
 /// Compact transparent pet window: speech bubble sits beside the spirit.
-const FLOATING_WIDTH: f64 = 268.0;
+const FLOATING_WIDTH: f64 = 282.0;
 const FLOATING_HEIGHT: f64 = 148.0;
-const FLOATING_MIN_WIDTH: f64 = 220.0;
-const FLOATING_MAX_WIDTH: f64 = 390.0;
+const FLOATING_MIN_WIDTH: f64 = 248.0;
+const FLOATING_MAX_WIDTH: f64 = 420.0;
 const FLOATING_MIN_HEIGHT: f64 = 120.0;
 const FLOATING_MAX_HEIGHT: f64 = 276.0;
 const MAX_CONTEXT_TURNS: usize = 6;
+const SESSION_MEMORY_FILE: &str = "session-memory.json";
+/// Temporary crash-recovery cache only; normal stop deletes it.
+const SESSION_MEMORY_TTL_MILLIS: u128 = 12 * 60 * 60 * 1000;
 const TRAY_SHOW_ID: &str = "show-main";
 const TRAY_EXIT_ID: &str = "quit";
 
@@ -44,11 +47,22 @@ struct ModelState {
     process: Mutex<Option<Child>>,
 }
 struct ContextState {
-    task_id: Mutex<Option<String>>,
-    turns: Mutex<VecDeque<ConversationTurn>>,
+    memory: Mutex<SessionMemory>,
 }
 
-#[derive(Clone)]
+/// A deliberately small, portable session memory. It is bounded by turn count
+/// and stored beside the executable, so it needs neither an account nor a
+/// platform-specific application-data directory.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionMemory {
+    task_id: Option<String>,
+    goal: Option<String>,
+    updated_at: String,
+    turns: VecDeque<ConversationTurn>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 struct ConversationTurn {
     user: String,
     assistant: String,
@@ -70,8 +84,7 @@ impl Default for ModelState {
 impl Default for ContextState {
     fn default() -> Self {
         Self {
-            task_id: Mutex::new(None),
-            turns: Mutex::new(VecDeque::new()),
+            memory: Mutex::new(load_session_memory()),
         }
     }
 }
@@ -252,24 +265,25 @@ fn strip_thinking(text: &str) -> String {
     cleaned.trim().to_owned()
 }
 
-fn response_diagnostic(value: &serde_json::Value) -> String {
-    if let Some(message) = value
-        .pointer("/error/message")
-        .and_then(|item| item.as_str())
-    {
-        return format!("模型返回错误：{message}");
+/// Extract one visible text delta from an OpenAI-compatible SSE chunk.
+/// llama-server uses `choices[].delta.content`, but keep the alternate text
+/// shape for compatible local servers as well.
+fn stream_delta_text(value: &serde_json::Value) -> Option<String> {
+    let delta = value
+        .pointer("/choices/0/delta/content")
+        .or_else(|| value.pointer("/choices/0/delta/text"))?;
+    match delta {
+        serde_json::Value::String(text) => (!text.is_empty()).then(|| text.to_owned()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => response_text(&json!({
+            "choices": [{ "message": { "content": delta } }]
+        })),
+        _ => None,
     }
-
-    let finish_reason = value
-        .pointer("/choices/0/finish_reason")
-        .and_then(|item| item.as_str())
-        .unwrap_or("未知");
-    format!("模型已收到屏幕截图，但没有生成识别内容（结束原因：{finish_reason}）")
 }
 
 #[cfg(test)]
 mod response_tests {
-    use super::{response_text, strip_thinking};
+    use super::{response_text, stream_delta_text, strip_thinking};
     use serde_json::json;
 
     #[test]
@@ -307,6 +321,12 @@ mod response_tests {
             "屏幕上有一个浏览器。"
         );
         assert_eq!(strip_thinking("可见结果。<THINK>不应显示"), "可见结果。");
+    }
+
+    #[test]
+    fn reads_streaming_delta_content() {
+        let chunk = json!({ "choices": [{ "delta": { "content": "正在生成" } }] });
+        assert_eq!(stream_delta_text(&chunk).as_deref(), Some("正在生成"));
     }
 
     #[test]
@@ -349,15 +369,11 @@ mod response_tests {
             }
         });
 
-        let previous: Vec<(&str, Option<String>)> = [
-            "HTTP_PROXY",
-            "http_proxy",
-            "HTTPS_PROXY",
-            "https_proxy",
-        ]
-        .into_iter()
-        .map(|key| (key, std::env::var(key).ok()))
-        .collect();
+        let previous: Vec<(&str, Option<String>)> =
+            ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"]
+                .into_iter()
+                .map(|key| (key, std::env::var(key).ok()))
+                .collect();
 
         std::env::set_var("HTTP_PROXY", "http://127.0.0.1:9");
         std::env::set_var("http_proxy", "http://127.0.0.1:9");
@@ -470,6 +486,60 @@ fn config_path() -> Result<PathBuf, String> {
 
 fn database_path() -> Result<PathBuf, String> {
     Ok(data_dir()?.join("baodou.db"))
+}
+
+fn session_memory_path() -> Result<PathBuf, String> {
+    Ok(data_dir()?.join(SESSION_MEMORY_FILE))
+}
+
+fn memory_is_fresh(memory: &SessionMemory) -> bool {
+    memory
+        .updated_at
+        .parse::<u128>()
+        .ok()
+        .and_then(|updated_at| {
+            now()
+                .parse::<u128>()
+                .ok()
+                .map(|current| current.saturating_sub(updated_at))
+        })
+        .is_some_and(|age| age <= SESSION_MEMORY_TTL_MILLIS)
+}
+
+fn load_session_memory() -> SessionMemory {
+    let Ok(path) = session_memory_path() else {
+        return SessionMemory::default();
+    };
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return SessionMemory::default();
+    };
+    let Ok(mut memory) = serde_json::from_str::<SessionMemory>(&raw) else {
+        return SessionMemory::default();
+    };
+
+    if memory.task_id.is_none() || !memory_is_fresh(&memory) {
+        let _ = fs::remove_file(path);
+        return SessionMemory::default();
+    }
+    while memory.turns.len() > MAX_CONTEXT_TURNS {
+        memory.turns.pop_front();
+    }
+    memory
+}
+
+fn persist_session_memory(memory: &SessionMemory) -> Result<(), String> {
+    let path = session_memory_path()?;
+    let raw = serde_json::to_string(memory).map_err(|e| e.to_string())?;
+    fs::write(path, raw).map_err(|e| format!("会话记忆写入失败：{e}"))
+}
+
+fn clear_session_memory(state: &ContextState) {
+    *state.memory.lock().expect("context poisoned") = SessionMemory::default();
+    if let Ok(path) = session_memory_path() {
+        // This cache is only for the active portable session. Ignore an absent
+        // file so normal stop remains idempotent.
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn database() -> Result<Connection, String> {
@@ -741,10 +811,7 @@ fn start_model(app: AppHandle) {
                 .lock()
                 .expect("model poisoned") = Some(child);
             if !wait_for_model(&app, &config.llama_url, 90) {
-                mark_model_not_ready(
-                    &app,
-                    "本地模型启动超时：推理服务未在预期时间内就绪",
-                );
+                mark_model_not_ready(&app, "本地模型启动超时：推理服务未在预期时间内就绪");
             }
         }
         Err(error) => {
@@ -808,6 +875,7 @@ fn recognize(
     query: &str,
     frame: &ScreenFrame,
     context: &[ConversationTurn],
+    mut on_delta: impl FnMut(&str),
 ) -> Result<String, String> {
     let prompt = format!("{}\n当前截图：", recognition_prompt(query));
     let mut messages = Vec::with_capacity(context.len() * 2 + 1);
@@ -833,24 +901,47 @@ fn recognize(
         "max_tokens": 384,
         // Context is bounded and retained only in memory for this task.
         "cache_prompt": false,
-        "stream": false,
+        "stream": true,
         "reasoning_format": "none",
         "chat_template_kwargs": { "enable_thinking": false },
         "messages": messages
     });
 
-    let response: serde_json::Value = local_http_client(endpoint, Duration::from_secs(25))
+    let response = local_http_client(endpoint, Duration::from_secs(25))
         .map_err(|e| e.to_string())?
         .post(endpoint)
         .json(&payload)
         .send()
         .map_err(|e| format!("识别请求失败：{e}"))?
         .error_for_status()
-        .map_err(|e| format!("模型接口错误：{e}"))?
-        .json()
-        .map_err(|e| format!("模型响应解析失败：{e}"))?;
+        .map_err(|e| format!("模型接口错误：{e}"))?;
 
-    response_text(&response).ok_or_else(|| response_diagnostic(&response))
+    let mut raw_text = String::new();
+    let mut visible_text = String::new();
+    for line in BufReader::new(response).lines() {
+        let line = line.map_err(|e| format!("读取流式模型响应失败：{e}"))?;
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data == "[DONE]" {
+            break;
+        }
+        let chunk: serde_json::Value = serde_json::from_str(data)
+            .map_err(|e| format!("模型流式响应解析失败：{e}"))?;
+        if let Some(delta) = stream_delta_text(&chunk) {
+            raw_text.push_str(&delta);
+            let cleaned = strip_thinking(&raw_text);
+            if !cleaned.is_empty() && cleaned != visible_text {
+                visible_text = cleaned;
+                on_delta(&visible_text);
+            }
+        }
+    }
+
+    (!visible_text.is_empty())
+        .then_some(visible_text)
+        .ok_or_else(|| "模型已收到屏幕截图，但没有生成识别内容".to_string())
 }
 
 fn task_active(app: &AppHandle, id: &str) -> bool {
@@ -936,8 +1027,23 @@ fn run_task(
     });
     {
         let context = app.state::<ContextState>();
-        *context.task_id.lock().expect("context poisoned") = Some(id.clone());
-        context.turns.lock().expect("context poisoned").clear();
+        let mut memory = context.memory.lock().expect("context poisoned");
+        // A previous active cache can only come from an interrupted run. Keep
+        // it for the same goal, so a portable app restart has just enough
+        // continuity without turning this into a cross-task history store.
+        let restored_turns =
+            if memory_is_fresh(&memory) && memory.goal.as_deref() == Some(goal.as_str()) {
+                memory.turns.clone()
+            } else {
+                VecDeque::new()
+            };
+        *memory = SessionMemory {
+            task_id: Some(id.clone()),
+            goal: Some(goal.clone()),
+            updated_at: timestamp,
+            turns: restored_turns,
+        };
+        persist_session_memory(&memory)?;
     }
 
     show_floating_window(app.clone()).map_err(|e| format!("无法显示悬浮窗：{e}"))?;
@@ -956,28 +1062,38 @@ fn recognition_loop(app: AppHandle, task_id: String, goal: String) {
         let context = {
             let state = app.state::<ContextState>();
             let turns = state
-                .turns
+                .memory
                 .lock()
                 .expect("context poisoned")
+                .turns
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>();
             turns
         };
-        match capture_primary().and_then(|frame| recognize(&endpoint, &goal, &frame, &context)) {
+        match capture_primary().and_then(|frame| {
+            let app_for_delta = app.clone();
+            let task_for_delta = task_id.clone();
+            recognize(&endpoint, &goal, &frame, &context, move |text| {
+                if task_active(&app_for_delta, &task_for_delta) {
+                    emit_floating(&app_for_delta, text, "recognizing");
+                }
+            })
+        }) {
             Ok(text) => {
                 {
                     let state = app.state::<ContextState>();
-                    if state.task_id.lock().expect("context poisoned").as_deref() == Some(&task_id)
-                    {
-                        let mut turns = state.turns.lock().expect("context poisoned");
-                        turns.push_back(ConversationTurn {
+                    let mut memory = state.memory.lock().expect("context poisoned");
+                    if memory.task_id.as_deref() == Some(&task_id) {
+                        memory.turns.push_back(ConversationTurn {
                             user: recognition_prompt(&goal),
                             assistant: text.clone(),
                         });
-                        while turns.len() > MAX_CONTEXT_TURNS {
-                            turns.pop_front();
+                        while memory.turns.len() > MAX_CONTEXT_TURNS {
+                            memory.turns.pop_front();
                         }
+                        memory.updated_at = now();
+                        let _ = persist_session_memory(&memory);
                     }
                 }
                 update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
@@ -1005,6 +1121,9 @@ fn recognition_loop(app: AppHandle, task_id: String, goal: String) {
                             ok: true,
                         },
                     );
+                    // The bubble has already received incremental text. Send
+                    // the final result too so it is correct even if no delta
+                    // was emitted by a compatible server.
                     emit_floating(&app, text.clone(), "recognizing");
                     last = text;
                 }
@@ -1017,10 +1136,8 @@ fn recognition_loop(app: AppHandle, task_id: String, goal: String) {
             }
         }
 
-        // `recognize` uses a non-streaming HTTP response, so control reaches
-        // here only after this frame's entire result has been generated and
-        // replaced in the floating bubble. The next iteration is therefore
-        // completion-driven rather than timer-driven.
+        // The next frame begins after this stream finishes. Its visible text
+        // is already emitted incrementally while generation is in progress.
     }
 }
 
@@ -1031,11 +1148,7 @@ fn stop_runtime(app: AppHandle, state: State<'_, RuntimeState>) -> RuntimeSnapsh
         s.message = "已停止实时屏幕识别".into();
     });
     emit_floating(&app, "识别已暂停", "stopped");
-    {
-        let context = app.state::<ContextState>();
-        *context.task_id.lock().expect("context poisoned") = None;
-        context.turns.lock().expect("context poisoned").clear();
-    }
+    clear_session_memory(app.state::<ContextState>().inner());
     let _ = hide_floating_window(app);
     snapshot
 }

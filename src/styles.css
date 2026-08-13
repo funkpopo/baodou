@@ -575,15 +575,20 @@ html.floating-mode #root {
   content: none;
 }
 
-/* Speech bubble sits outside the pet body (left side). */
+/*
+ * The pet owns the right-most 112px of the transparent canvas.  Pinning the
+ * speech bubble's right edge before that lane makes the separation hold at
+ * every dynamic window width, rather than relying on an approximate offset.
+ */
 .floating-speech {
   position: absolute;
-  left: 6px;
+  left: 8px;
+  right: 112px;
   top: 50%;
   z-index: 4;
-  width: fit-content;
+  width: auto;
   min-width: 128px;
-  max-width: 244px;
+  max-width: min(244px, calc(100% - 120px));
   /* The shell height follows this bubble; only long message text scrolls. */
   max-height: 252px;
   padding: 8px 10px 9px;
@@ -640,7 +645,7 @@ html.floating-mode #root {
 
 .floating-speech p {
   margin: 0;
-  max-width: 244px;
+  max-width: 100%;
   max-height: 188px;
   overflow-x: hidden;
   overflow-y: auto;

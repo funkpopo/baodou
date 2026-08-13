@@ -194,10 +194,12 @@ function FloatingApp() {
 
       const speech = speechRef.current;
       if (speech) {
-        // The pet occupies the right edge; account for it when fitting the
-        // native transparent window to the naturally sized speech bubble.
-        const width = Math.ceil(speech.getBoundingClientRect().width + 98);
-        const height = Math.ceil(speech.getBoundingClientRect().height + 24);
+        // The right side is a dedicated, non-overlapping lane for the pet.
+        // Keep that lane in the native window measurement as well, otherwise
+        // a wide bubble can grow beneath the spirit after a message refresh.
+        const petSafeLane = 112;
+        const width = Math.ceil(speech.getBoundingClientRect().width + petSafeLane + 8);
+        const height = Math.ceil(Math.max(speech.getBoundingClientRect().height, 96) + 24);
         void bridge.resizeFloating(width, height).catch(() => undefined);
       }
     });
