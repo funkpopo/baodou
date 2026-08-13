@@ -5,6 +5,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
+    collections::VecDeque,
     env, fs,
     io::Cursor,
     path::{Path, PathBuf},
@@ -13,8 +14,10 @@ use std::{
     time::Duration,
 };
 use tauri::{
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
     AppHandle, Emitter, LogicalPosition, Manager, Position, State, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder,
+    WebviewWindowBuilder, WindowEvent,
 };
 use uuid::Uuid;
 use xcap::Monitor;
@@ -30,12 +33,25 @@ const FLOATING_MIN_WIDTH: f64 = 220.0;
 const FLOATING_MAX_WIDTH: f64 = 390.0;
 const FLOATING_MIN_HEIGHT: f64 = 120.0;
 const FLOATING_MAX_HEIGHT: f64 = 276.0;
+const MAX_CONTEXT_TURNS: usize = 6;
+const TRAY_SHOW_ID: &str = "show-main";
+const TRAY_EXIT_ID: &str = "quit";
 
 struct RuntimeState {
     snapshot: Mutex<RuntimeSnapshot>,
 }
 struct ModelState {
     process: Mutex<Option<Child>>,
+}
+struct ContextState {
+    task_id: Mutex<Option<String>>,
+    turns: Mutex<VecDeque<ConversationTurn>>,
+}
+
+#[derive(Clone)]
+struct ConversationTurn {
+    user: String,
+    assistant: String,
 }
 impl Default for RuntimeState {
     fn default() -> Self {
@@ -48,6 +64,14 @@ impl Default for ModelState {
     fn default() -> Self {
         Self {
             process: Mutex::new(None),
+        }
+    }
+}
+impl Default for ContextState {
+    fn default() -> Self {
+        Self {
+            task_id: Mutex::new(None),
+            turns: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -773,35 +797,46 @@ fn capture_primary() -> Result<ScreenFrame, String> {
     })
 }
 
-fn recognize(endpoint: &str, query: &str, frame: &ScreenFrame) -> Result<String, String> {
-    let prompt = format!(
-        "/no_think\n你是实时屏幕识别助手。此消息附有一张刚刚截取的当前屏幕 PNG 图片，必须直接观察这张图片作答，不能只根据文字猜测。不要展示思考过程，直接给出最终识别结果。用户关注：{query}\n仅描述当前画面中与关注点最相关的可见信息。不要建议点击、输入、打开、关闭或操作任何程序；不要输出步骤、坐标或 ACTION。用简洁中文回答，最多三句、120字。若图片不清晰或无法判断，直接说明原因。"
-    );
+fn recognition_prompt(query: &str) -> String {
+    format!(
+        "/no_think\n你是实时屏幕识别助手。此消息附有一张刚刚截取的当前屏幕 PNG 图片，必须直接观察这张图片作答，不能只根据文字猜测。不要展示思考过程，直接给出最终识别结果。用户关注：{query}\n仅描述当前画面中与关注点最相关的可见信息。可以结合此前观察结果说明变化，但不要把此前内容当作当前画面的事实。不要建议点击、输入、打开、关闭或操作任何程序；不要输出步骤、坐标或 ACTION。用简洁中文回答，最多三句、120字。若图片不清晰或无法判断，直接说明原因。"
+    )
+}
+
+fn recognize(
+    endpoint: &str,
+    query: &str,
+    frame: &ScreenFrame,
+    context: &[ConversationTurn],
+) -> Result<String, String> {
+    let prompt = format!("{}\n当前截图：", recognition_prompt(query));
+    let mut messages = Vec::with_capacity(context.len() * 2 + 1);
+    for turn in context {
+        messages.push(json!({ "role": "user", "content": turn.user }));
+        messages.push(json!({ "role": "assistant", "content": turn.assistant }));
+    }
+    messages.push(json!({
+        "role": "user",
+        "content": [
+            { "type": "text", "text": prompt },
+            {
+                "type": "image_url",
+                "image_url": { "url": format!("data:image/png;base64,{}", frame.png_base64) }
+            }
+        ]
+    }));
     let payload = json!({
         "model": "local-vision",
         // Qwen can otherwise spend the entire 140-token budget in its hidden
         // reasoning phase, leaving `content` empty and returning `length`.
         "temperature": 0.1,
         "max_tokens": 384,
-        // Each frame is an isolated, non-streaming observation. The complete
-        // response is received before another screen capture is started.
-        // Do not reuse a previous request's prompt/KV cache as visual context.
+        // Context is bounded and retained only in memory for this task.
         "cache_prompt": false,
         "stream": false,
         "reasoning_format": "none",
         "chat_template_kwargs": { "enable_thinking": false },
-        "messages": [{
-            "role": "user",
-            "content": [
-                { "type": "text", "text": prompt },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": format!("data:image/png;base64,{}", frame.png_base64)
-                    }
-                }
-            ]
-        }]
+        "messages": messages
     });
 
     let response: serde_json::Value = local_http_client(endpoint, Duration::from_secs(25))
@@ -899,6 +934,11 @@ fn run_task(
         snapshot.goal = Some(goal.clone());
         snapshot.message = "正在采集屏幕并识别".into();
     });
+    {
+        let context = app.state::<ContextState>();
+        *context.task_id.lock().expect("context poisoned") = Some(id.clone());
+        context.turns.lock().expect("context poisoned").clear();
+    }
 
     show_floating_window(app.clone()).map_err(|e| format!("无法显示悬浮窗：{e}"))?;
     emit_floating(&app, "正在识别屏幕内容…", "recognizing");
@@ -913,8 +953,33 @@ fn recognition_loop(app: AppHandle, task_id: String, goal: String) {
     let mut last = String::new();
 
     while task_active(&app, &task_id) {
-        match capture_primary().and_then(|frame| recognize(&endpoint, &goal, &frame)) {
+        let context = {
+            let state = app.state::<ContextState>();
+            let turns = state
+                .turns
+                .lock()
+                .expect("context poisoned")
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            turns
+        };
+        match capture_primary().and_then(|frame| recognize(&endpoint, &goal, &frame, &context)) {
             Ok(text) => {
+                {
+                    let state = app.state::<ContextState>();
+                    if state.task_id.lock().expect("context poisoned").as_deref() == Some(&task_id)
+                    {
+                        let mut turns = state.turns.lock().expect("context poisoned");
+                        turns.push_back(ConversationTurn {
+                            user: recognition_prompt(&goal),
+                            assistant: text.clone(),
+                        });
+                        while turns.len() > MAX_CONTEXT_TURNS {
+                            turns.pop_front();
+                        }
+                    }
+                }
                 update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
                     snapshot.model_ready = true;
                     snapshot.message = text.clone();
@@ -966,6 +1031,11 @@ fn stop_runtime(app: AppHandle, state: State<'_, RuntimeState>) -> RuntimeSnapsh
         s.message = "已停止实时屏幕识别".into();
     });
     emit_floating(&app, "识别已暂停", "stopped");
+    {
+        let context = app.state::<ContextState>();
+        *context.task_id.lock().expect("context poisoned") = None;
+        context.turns.lock().expect("context poisoned").clear();
+    }
     let _ = hide_floating_window(app);
     snapshot
 }
@@ -1063,14 +1133,60 @@ fn hide_floating_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let menu = Menu::new(app)?;
+    let show = MenuItem::with_id(app, TRAY_SHOW_ID, "显示主界面", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, TRAY_EXIT_ID, "退出", true, None::<&str>)?;
+    menu.append_items(&[&show, &quit])?;
+
+    TrayIconBuilder::with_id("baodou-tray")
+        .icon(
+            app.default_window_icon()
+                .cloned()
+                .expect("missing application icon"),
+        )
+        .tooltip("baodou")
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_SHOW_ID => show_main_window(app),
+            TRAY_EXIT_ID => {
+                stop_model(app);
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .build(app)?;
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(RuntimeState::default())
         .manage(ModelState::default())
+        .manage(ContextState::default())
         .setup(|app| {
             let _ = data_dir().map_err(|e| std::io::Error::other(e))?;
             let _ = database().map_err(|e| std::io::Error::other(e))?;
             let _ = persist_config_file(&load_model_config());
+            build_tray(&app.handle())?;
+
+            if let Some(main) = app.get_webview_window("main") {
+                let main_for_close = main.clone();
+                main.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = main_for_close.hide();
+                    }
+                });
+            }
 
             // Ensure the floating webview is created at startup (hidden),
             // so show/hide later only toggles visibility.

@@ -99,6 +99,7 @@ function MainApp() {
     try {
       await bridge.start(DEFAULT_GOAL);
       await bridge.showFloating();
+      await currentWindow.hide();
     } catch (cause) {
       setError(String(cause));
       setRuntime((current) => ({ ...current, phase: "error" }));
@@ -137,7 +138,7 @@ function MainApp() {
           <button className="window-button" onClick={() => void currentWindow.minimize()} aria-label="最小化">
             <Minimize2 size={14} />
           </button>
-          <button className="window-button close-button" onClick={() => void currentWindow.close()} aria-label="关闭">
+          <button className="window-button close-button" onClick={() => void currentWindow.hide()} aria-label="隐藏到任务栏">
             <X size={14} />
           </button>
         </div>
