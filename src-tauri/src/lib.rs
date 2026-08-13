@@ -25,13 +25,16 @@ use uuid::Uuid;
 
 const PROTOCOL_VERSION: &str = "2.0.0";
 const LLAMA_ENDPOINT: &str = "http://[IP]:8765/v1/chat/completions";
-const DEFAULT_GOAL: &str = "描述当前屏幕上的关键可见内容";
+const DEFAULT_GOAL: &str = "帮我观察当前电脑界面，留意最要紧、最清楚的可见内容";
 const FLOATING_LABEL: &str = "floating";
-/// Compact transparent pet window: speech bubble sits beside the spirit.
-/// Size is fixed so the native window is never resized while text streams
-/// in — live set_size + set_position on a transparent WebView tears.
-const FLOATING_WIDTH: f64 = 496.0;
-const FLOATING_HEIGHT: f64 = 176.0;
+/// Pet-only default HWND. The frontend resizes this to the visible pet +
+/// bubble so leftover transparent chrome does not swallow clicks.
+const FLOATING_WIDTH: f64 = 104.0;
+const FLOATING_HEIGHT: f64 = 104.0;
+const FLOATING_MIN_WIDTH: f64 = 104.0;
+const FLOATING_MIN_HEIGHT: f64 = 104.0;
+const FLOATING_MAX_WIDTH: f64 = 480.0;
+const FLOATING_MAX_HEIGHT: f64 = 240.0;
 
 // --- P0: streamed display throttle (sentence-first, then 120–200 ms) ---
 const FLUSH_FIRST_CHARS: usize = 26;
@@ -204,7 +207,7 @@ impl Default for RuntimeSnapshot {
             model_ready: false,
             task_id: None,
             goal: None,
-            message: "本地屏幕识别运行时已就绪".into(),
+            message: "我在桌边呢，随时可以帮你看屏幕。".into(),
             rounds: 0,
             skipped_rounds: 0,
             requests: 0,
@@ -1066,14 +1069,15 @@ fn ends_with_terminal(text: &str) -> bool {
 
 fn recognition_prompt(query: &str) -> String {
     format!(
-        "/no_think\n你是 Baodou，一位常驻用户桌面的本地 AI 伴侣，气质温暖、沉稳、敏锐，善于观察但绝不虚构看不见的内容。此消息附有一张刚截取的屏幕图片，请直接观察图片作答。用户当前关注：{query}\n\
+        "/no_think\n你是 Baodou，坐在用户桌边的拟人视觉助手。你此刻正看着眼前这张刚截取的屏幕画面，任务是陪用户观察电脑界面：把你真正看见的东西，用身边人轻声提醒的口吻说出来。用户当前想让你留意：{query}\n\
         回答要求：\n\
-        1. 第一句给出当前画面上最重要且最明确的可见状态或内容。\n\
-        2. 第二句补充 1–2 项与当前关注点直接相关的信息。\n\
-        3. 只依据这一张截图作答；单张截图无法观察到时间上的“变化”，不要声称看到了过程或前后的变化。\n\
-        4. 模糊、小字、图标或数字无法确认时，如实说明“看不清/无法确认”，严禁补全、猜测或推测用户的意图。\n\
-        5. 禁止给出点击、输入、打开、关闭等操作步骤，禁止输出坐标或 ACTION。\n\
-        最多两句、短而完整的中文摘要。"
+        1. 用第一人称短句（如“我看见…”“这边是…”），像陪在旁边看屏幕，不要写成检测报告、列表或系统日志。\n\
+        2. 第一句点出画面上最重要且最明确的可见内容或界面状态。\n\
+        3. 第二句再补 1–2 项与当前关注点直接相关的细节（窗口、关键文字、按钮状态、报错等）。\n\
+        4. 只依据这一张截图；你看不见前后过程，不要说“变了/刚刚/正在变化”。\n\
+        5. 模糊、小字、图标或数字无法确认时，如实说“我看不清/无法确认”，严禁补全、猜测或推测用户意图。\n\
+        6. 你只负责看和说：禁止点击、输入、打开、关闭等操作建议，禁止输出坐标或 ACTION。\n\
+        最多两句、短而完整的中文。"
     )
 }
 
@@ -1261,7 +1265,7 @@ fn run_task(
         snapshot.phase = "recognizing".into();
         snapshot.task_id = Some(id.clone());
         snapshot.goal = Some(goal.clone());
-        snapshot.message = "正在采集屏幕并识别".into();
+        snapshot.message = "我先看一眼现在的屏幕…".into();
     });
     show_floating_window(app.clone()).map_err(|e| format!("无法显示悬浮窗：{e}"))?;
     let clone = app.clone();
@@ -1623,9 +1627,9 @@ fn recognition_loop(app: AppHandle, task_id: String, goal: String) {
 fn stop_runtime(app: AppHandle, state: State<'_, RuntimeState>) -> RuntimeSnapshot {
     let snapshot = update_snapshot(&state, |s| {
         s.phase = "stopped".into();
-        s.message = "已停止实时屏幕识别".into();
+        s.message = "好，我先不看了。".into();
     });
-    emit_floating(&app, "识别已暂停", "stopped");
+    emit_floating(&app, "好，我先歇一会儿。", "stopped");
     let _ = hide_floating_window(app);
     snapshot
 }
@@ -1637,20 +1641,21 @@ fn pause_runtime(app: AppHandle, state: State<'_, RuntimeState>) -> RuntimeSnaps
 
 fn ensure_floating_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     if let Some(window) = app.get_webview_window(FLOATING_LABEL) {
+        apply_floating_size_limits(&window);
         return Ok(window);
     }
 
     // Fallback when the preconfigured window is missing (e.g. older builds).
     // Load with an explicit query so the frontend can still detect floating mode.
-    WebviewWindowBuilder::new(
+    let window = WebviewWindowBuilder::new(
         app,
         FLOATING_LABEL,
         WebviewUrl::App("index.html?window=floating".into()),
     )
     .title("baodou")
     .inner_size(FLOATING_WIDTH, FLOATING_HEIGHT)
-    .min_inner_size(FLOATING_WIDTH, FLOATING_HEIGHT)
-    .max_inner_size(FLOATING_WIDTH, FLOATING_HEIGHT)
+    .min_inner_size(FLOATING_MIN_WIDTH, FLOATING_MIN_HEIGHT)
+    .max_inner_size(FLOATING_MAX_WIDTH, FLOATING_MAX_HEIGHT)
     .visible(false)
     .always_on_top(true)
     .decorations(false)
@@ -1660,7 +1665,20 @@ fn ensure_floating_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     .resizable(false)
     .focused(false)
     .build()
-    .map_err(|e| format!("创建悬浮窗失败：{e}"))
+    .map_err(|e| format!("创建悬浮窗失败：{e}"))?;
+    apply_floating_size_limits(&window);
+    Ok(window)
+}
+
+fn apply_floating_size_limits(window: &WebviewWindow) {
+    let _ = window.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize::new(
+        FLOATING_MIN_WIDTH,
+        FLOATING_MIN_HEIGHT,
+    ))));
+    let _ = window.set_max_size(Some(tauri::Size::Logical(tauri::LogicalSize::new(
+        FLOATING_MAX_WIDTH,
+        FLOATING_MAX_HEIGHT,
+    ))));
 }
 
 fn position_floating_window(
@@ -1709,9 +1727,54 @@ fn show_floating_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn resize_floating_window(_app: AppHandle, _width: f64, _height: f64) -> Result<(), String> {
-    // Overlay size is fixed. Growing the bubble in CSS avoids compositor
-    // tearing from set_size + set_position on a transparent WebView.
+fn resize_floating_window(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(FLOATING_LABEL) else {
+        return Ok(());
+    };
+    let width = width.round().clamp(FLOATING_MIN_WIDTH, FLOATING_MAX_WIDTH);
+    let height = height.round().clamp(FLOATING_MIN_HEIGHT, FLOATING_MAX_HEIGHT);
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let current_size = window.inner_size().map_err(|e| e.to_string())?;
+    let current_pos = window.outer_position().map_err(|e| e.to_string())?;
+    let current_w = f64::from(current_size.width) / scale;
+    let current_h = f64::from(current_size.height) / scale;
+    let current_x = f64::from(current_pos.x) / scale;
+    let current_y = f64::from(current_pos.y) / scale;
+
+    if (current_w - width).abs() < 0.5 && (current_h - height).abs() < 0.5 {
+        return Ok(());
+    }
+
+    let mut x = current_x + current_w - width;
+    let mut y = current_y + current_h - height;
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        let monitor_scale = monitor.scale_factor();
+        let screen = monitor.size();
+        let work_w = f64::from(screen.width) / monitor_scale;
+        let work_h = f64::from(screen.height) / monitor_scale;
+        x = x.clamp(12.0, (work_w - width - 12.0).max(12.0));
+        y = y.clamp(12.0, (work_h - height - 12.0).max(12.0));
+    }
+
+    let size = tauri::Size::Logical(tauri::LogicalSize::new(width, height));
+    let position = Position::Logical(LogicalPosition::new(x, y));
+    // Expand left/up first so the pet stays put; shrink the HWND before moving.
+    let expanding = width > current_w + 0.5 || height > current_h + 0.5;
+    if expanding {
+        window
+            .set_position(position)
+            .map_err(|e| format!("定位悬浮窗失败：{e}"))?;
+        window
+            .set_size(size)
+            .map_err(|e| format!("设置悬浮窗尺寸失败：{e}"))?;
+    } else {
+        window
+            .set_size(size)
+            .map_err(|e| format!("设置悬浮窗尺寸失败：{e}"))?;
+        window
+            .set_position(position)
+            .map_err(|e| format!("定位悬浮窗失败：{e}"))?;
+    }
     Ok(())
 }
 

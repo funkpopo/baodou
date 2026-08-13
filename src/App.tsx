@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CircleStop, Minimize2, Play, Sparkles, X } from "lucide-react";
 import { bridge } from "./bridge";
-import type { FloatingMessage, RuntimeSnapshot } from "./types";
+import type { FloatingMessage, Phase, RuntimeSnapshot } from "./types";
 
-const DEFAULT_GOAL = "描述当前屏幕上的关键可见内容";
+const DEFAULT_GOAL = "帮我观察当前电脑界面，留意最要紧、最清楚的可见内容";
 
 const initialRuntime: RuntimeSnapshot = {
   protocolVersion: "2.0.0",
@@ -16,7 +16,7 @@ const initialRuntime: RuntimeSnapshot = {
   modelReady: false,
   taskId: null,
   goal: null,
-  message: "Baodou 已在桌面旁陪伴，随时准备观察。",
+  message: "我在桌边呢，随时可以帮你看屏幕。",
   rounds: 0,
   skippedRounds: 0,
   requests: 0,
@@ -98,7 +98,7 @@ function MainApp() {
       ...current,
       phase: "recognizing",
       goal: DEFAULT_GOAL,
-      message: "正在采集并识别屏幕内容…",
+      message: "我先看一眼现在的屏幕…",
     }));
     try {
       await bridge.start(DEFAULT_GOAL);
@@ -176,14 +176,75 @@ function MainApp() {
   );
 }
 
+const WAITING_TEXT = "我先看一眼现在的屏幕…";
+
+function isWaitingSpeech(text: string) {
+  const value = text.trim();
+  return (
+    !value ||
+    value === WAITING_TEXT ||
+    value.startsWith("我在桌边呢") ||
+    value === "本地屏幕识别运行时已就绪"
+  );
+}
+
+function floatingStatusLabel(phase: Phase, active: boolean) {
+  if (phase === "error") return "需要处理";
+  if (phase === "stopped") return "已暂停";
+  if (active || phase === "recognizing") return "观察中";
+  return "等待中";
+}
+
+function measureFloatingShell(shell: HTMLElement) {
+  const styles = getComputedStyle(shell);
+  const padX = Number.parseFloat(styles.paddingLeft) + Number.parseFloat(styles.paddingRight);
+  const padY = Number.parseFloat(styles.paddingTop) + Number.parseFloat(styles.paddingBottom);
+  const gap = Number.parseFloat(styles.columnGap || styles.gap) || 0;
+  const pet = shell.querySelector<HTMLElement>(".floating-pet");
+  const speech = shell.querySelector<HTMLElement>(".floating-speech");
+  const petW = pet?.offsetWidth ?? 88;
+  const petH = pet?.offsetHeight ?? 88;
+  if (!speech) {
+    return { width: Math.ceil(padX + petW), height: Math.ceil(padY + petH) };
+  }
+
+  // WebView's initial containing block is the current HWND. Measure inside a
+  // wide offscreen host so the bubble can report its intrinsic size.
+  const host = document.createElement("div");
+  host.setAttribute("aria-hidden", "true");
+  host.style.cssText =
+    "position:absolute;left:-10000px;top:0;width:10000px;height:auto;visibility:hidden;pointer-events:none;";
+  const probe = speech.cloneNode(true) as HTMLElement;
+  probe.style.cssText =
+    "position:static;display:flex;flex-direction:column;width:max-content;max-width:348px;height:auto;max-height:none;margin:0;overflow:visible;";
+  const probeBody = probe.querySelector("p");
+  if (probeBody instanceof HTMLElement) {
+    probeBody.style.cssText =
+      "width:max-content;max-width:328px;height:auto;overflow:visible;white-space:pre-wrap;";
+  }
+  host.appendChild(probe);
+  document.body.appendChild(host);
+  const speechW = Math.ceil(probe.offsetWidth);
+  const speechH = Math.ceil(probe.offsetHeight);
+  host.remove();
+
+  return {
+    width: Math.ceil(padX + petW + gap + speechW + 8),
+    height: Math.ceil(padY + Math.max(petH, speechH) + 6),
+  };
+}
+
 function FloatingApp() {
   const [message, setMessage] = useState<FloatingMessage>({
     text: "",
-    phase: "recognizing",
+    phase: "idle",
     updatedAt: "",
   });
-  const [active, setActive] = useState(true);
+  const [active, setActive] = useState(false);
   const messageBodyRef = useRef<HTMLParagraphElement>(null);
+  const shellRef = useRef<HTMLElement>(null);
+  const lastSizeRef = useRef({ width: 0, height: 0 });
+  const scheduleSizeRef = useRef<() => void>(() => undefined);
   const currentWindow = getCurrentWindow();
 
   useEffect(() => {
@@ -202,41 +263,97 @@ function FloatingApp() {
     let cleanupRecognition: (() => void) | undefined;
     void bridge
       .onFloating((payload) => {
-        setMessage(payload);
         setActive(payload.phase === "recognizing");
+        setMessage({
+          ...payload,
+          text: isWaitingSpeech(payload.text) ? "" : payload.text,
+        });
       })
       .then((unlisten) => {
         cleanupFloating = unlisten;
       });
     void bridge
       .onRecognition((event) => {
+        setActive(event.phase === "recognizing");
         setMessage({
-          text: event.detail,
+          text: isWaitingSpeech(event.detail) ? "" : event.detail,
           phase: event.phase,
           updatedAt: event.timestamp,
         });
-        setActive(event.phase === "recognizing");
       })
       .then((unlisten) => {
         cleanupRecognition = unlisten;
       });
     void bridge.runtime().then((runtime) => {
       setActive(runtime.phase === "recognizing");
-      // A recognition round starts without a placeholder message.  The
-      // bubble should only contain model output once it is available.
-      if (runtime.message && runtime.phase !== "recognizing") {
-        setMessage((current) => ({
-          ...current,
-          text: runtime.message,
-          phase: runtime.phase,
-        }));
-      }
     });
     return () => {
       cleanupFloating?.();
       cleanupRecognition?.();
     };
   }, []);
+
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
+
+    let frame = 0;
+    let shrinkTimer = 0;
+    const syncSize = (force = false) => {
+      const { width, height } = measureFloatingShell(shell);
+      const last = lastSizeRef.current;
+      if (
+        !force &&
+        Math.abs(width - last.width) < 1 &&
+        Math.abs(height - last.height) < 1
+      ) {
+        return;
+      }
+      const expanding = width > last.width + 0.5 || height > last.height + 0.5;
+      lastSizeRef.current = { width, height };
+      window.clearTimeout(shrinkTimer);
+      if (force || expanding || last.width === 0) {
+        void bridge.resizeFloating(width, height);
+        return;
+      }
+      shrinkTimer = window.setTimeout(() => {
+        void bridge.resizeFloating(width, height);
+      }, 90);
+    };
+    const schedule = (force = false) => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => syncSize(force));
+    };
+    scheduleSizeRef.current = schedule;
+
+    schedule(true);
+    const observer = new ResizeObserver(() => schedule());
+    observer.observe(shell);
+
+    let visible = false;
+    const visibilityTimer = window.setInterval(() => {
+      void currentWindow.isVisible().then((next) => {
+        if (next && !visible) {
+          lastSizeRef.current = { width: 0, height: 0 };
+          schedule(true);
+        }
+        visible = next;
+      });
+    }, 200);
+
+    return () => {
+      scheduleSizeRef.current = () => undefined;
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(shrinkTimer);
+      window.clearInterval(visibilityTimer);
+      observer.disconnect();
+    };
+  }, [currentWindow]);
+
+  useEffect(() => {
+    lastSizeRef.current = { width: 0, height: 0 };
+    scheduleSizeRef.current(true);
+  }, [message.text, message.phase]);
 
   function dragWindow(event: React.MouseEvent<HTMLElement>) {
     if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
@@ -253,6 +370,7 @@ function FloatingApp() {
 
   return (
     <main
+      ref={shellRef}
       className={`floating-shell ${active ? "is-active" : ""}`}
       data-tauri-drag-region
       onMouseDown={dragWindow}
@@ -261,18 +379,16 @@ function FloatingApp() {
         <div className="floating-speech" role="status" aria-live="polite">
           <div className="floating-speech-meta">
             <span className={`status-pip ${active ? "live" : ""}`} />
-            <strong>{active ? "识别中" : "已暂停"}</strong>
+            <strong>{floatingStatusLabel(message.phase, active)}</strong>
             <button className="floating-close" onClick={() => void hide()} aria-label="隐藏悬浮窗">
               <X size={11} />
             </button>
           </div>
           <p ref={messageBodyRef}>{message.text}</p>
         </div>
-      ) : (
-        <div className="floating-speech-spacer" aria-hidden />
-      )}
+      ) : null}
 
-      <div className="floating-pet" aria-hidden>
+      <div className="floating-pet">
         <div className="bot-orbit orbit-one" />
         <div className="bot-orbit orbit-two" />
         <div className="bubble-bot">
