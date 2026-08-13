@@ -1639,9 +1639,17 @@ fn pause_runtime(app: AppHandle, state: State<'_, RuntimeState>) -> RuntimeSnaps
     stop_runtime(app, state)
 }
 
+/// Keeps Baodou windows out of screen capture (WDA_EXCLUDEFROMCAPTURE).
+/// Graphics Capture / DXGI then see the desktop behind them instead of the
+/// pet, bubble, or main launcher.
+fn exclude_window_from_capture(window: &WebviewWindow) {
+    let _ = window.set_content_protected(true);
+}
+
 fn ensure_floating_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     if let Some(window) = app.get_webview_window(FLOATING_LABEL) {
         apply_floating_size_limits(&window);
+        exclude_window_from_capture(&window);
         return Ok(window);
     }
 
@@ -1664,9 +1672,11 @@ fn ensure_floating_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     .skip_taskbar(true)
     .resizable(false)
     .focused(false)
+    .content_protected(true)
     .build()
     .map_err(|e| format!("创建悬浮窗失败：{e}"))?;
     apply_floating_size_limits(&window);
+    exclude_window_from_capture(&window);
     Ok(window)
 }
 
@@ -1831,6 +1841,7 @@ pub fn run() {
             build_tray(app.handle())?;
 
             if let Some(main) = app.get_webview_window("main") {
+                exclude_window_from_capture(&main);
                 let main_for_close = main.clone();
                 main.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {

@@ -72,6 +72,10 @@ impl ScreenFrame {
 /// Captures the primary monitor, downsamples in memory and computes both
 /// change-detection grids.  There is intentionally no PNG round-trip here:
 /// the JPEG for the model is encoded directly from the in-memory downsample.
+///
+/// On Windows this uses Graphics Capture (`xcap` `wgc` feature). Combined with
+/// `WDA_EXCLUDEFROMCAPTURE` on Baodou's own HWNDs, the pet / bubble / launcher
+/// are omitted and the desktop behind them is what the model sees.
 pub fn capture_primary() -> Result<CapturedFrame, String> {
     let monitor = Monitor::all()
         .map_err(|e| format!("枚举显示器失败：{e}"))?
