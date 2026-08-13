@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CircleStop, Minimize2, Play, Sparkles, X } from "lucide-react";
 import { bridge } from "./bridge";
@@ -183,62 +183,15 @@ function FloatingApp() {
     updatedAt: "",
   });
   const [active, setActive] = useState(true);
-  const shellRef = useRef<HTMLElement>(null);
-  const speechRef = useRef<HTMLDivElement>(null);
   const messageBodyRef = useRef<HTMLParagraphElement>(null);
   const currentWindow = getCurrentWindow();
 
-  // Debounced native resize: streamed updates arrive in bursts, and letting
-  // each one trigger a WebView reflow + native window resize adds jank.  Only
-  // the latest size is applied, at most every 180ms, with a flush on exit.
-  const resizeTimerRef = useRef<number | null>(null);
-  const pendingSizeRef = useRef<{ width: number; height: number } | null>(null);
-
-  const applyPendingResize = () => {
-    resizeTimerRef.current = null;
-    if (pendingSizeRef.current) {
-      void bridge
-        .resizeFloating(pendingSizeRef.current.width, pendingSizeRef.current.height)
-        .catch(() => undefined);
-      pendingSizeRef.current = null;
+  useEffect(() => {
+    const messageBody = messageBodyRef.current;
+    if (messageBody) {
+      messageBody.scrollTop = messageBody.scrollHeight;
     }
-  };
-
-  useLayoutEffect(() => {
-    // Let the new message paint first, then measure the speech bubble and
-    // fit the native transparent window around it (debounced).
-    const frame = window.requestAnimationFrame(() => {
-      const messageBody = messageBodyRef.current;
-      if (messageBody) {
-        messageBody.scrollTop = messageBody.scrollHeight;
-      }
-
-      const speech = speechRef.current;
-      if (speech) {
-        // The spirit stays pinned to the right. Measure the bubble's own
-        // box (not a transformed rect) and grow/shrink the canvas leftward.
-        const speechRight = Number.parseFloat(getComputedStyle(speech).right) || 104;
-        const leftPad = 8;
-        const width = Math.ceil(speech.offsetWidth + speechRight + leftPad);
-        const height = Math.ceil(Math.max(speech.offsetHeight, 96) + 24);
-        pendingSizeRef.current = { width, height };
-        if (resizeTimerRef.current == null) {
-          resizeTimerRef.current = window.setTimeout(applyPendingResize, 180);
-        }
-      }
-    });
-    return () => window.cancelAnimationFrame(frame);
   }, [message.text]);
-
-  useEffect(
-    () => () => {
-      if (resizeTimerRef.current != null) {
-        window.clearTimeout(resizeTimerRef.current);
-        applyPendingResize();
-      }
-    },
-    [],
-  );
 
   useEffect(() => {
     document.documentElement.classList.add("floating-mode");
@@ -300,14 +253,12 @@ function FloatingApp() {
 
   return (
     <main
-      ref={shellRef}
       className={`floating-shell ${active ? "is-active" : ""}`}
       data-tauri-drag-region
       onMouseDown={dragWindow}
     >
-      {/* Speech bubble sits outside the spirit body on a pure transparent canvas. */}
-      {message.text && (
-        <div ref={speechRef} className="floating-speech" role="status" aria-live="polite">
+      {message.text ? (
+        <div className="floating-speech" role="status" aria-live="polite">
           <div className="floating-speech-meta">
             <span className={`status-pip ${active ? "live" : ""}`} />
             <strong>{active ? "识别中" : "已暂停"}</strong>
@@ -317,6 +268,8 @@ function FloatingApp() {
           </div>
           <p ref={messageBodyRef}>{message.text}</p>
         </div>
+      ) : (
+        <div className="floating-speech-spacer" aria-hidden />
       )}
 
       <div className="floating-pet" aria-hidden>

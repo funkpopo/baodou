@@ -550,7 +550,7 @@ button:disabled {
   text-overflow: ellipsis;
 }
 
-/* ── Floating spirit window (pure transparent canvas) ── */
+/* ── Floating spirit window (fixed transparent canvas) ── */
 html.floating-mode,
 html.floating-mode body,
 html.floating-mode #root {
@@ -559,15 +559,18 @@ html.floating-mode #root {
 }
 
 .floating-shell {
-  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
   width: 100%;
   height: 100%;
   margin: 0;
-  padding: 0;
-  overflow: visible;
+  padding: 12px 10px 12px 12px;
+  overflow: hidden;
   background: transparent !important;
   background-color: rgba(0, 0, 0, 0) !important;
-  /* No dim/mask layer — only the pet and speech bubble paint pixels. */
+  contain: layout paint;
 }
 
 .floating-shell::before,
@@ -575,51 +578,50 @@ html.floating-mode #root {
   content: none;
 }
 
+.floating-speech-spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 /*
- * The pet stays on the right. The bubble is right-aligned against that lane
- * and sizes to its message, so short text closes toward the spirit and long
- * text grows left without leaving a gap.
+ * Bubble lives inside a fixed native window. Short text hugs the pet;
+ * long text grows left then scrolls — never resize the OS window.
  */
 .floating-speech {
-  position: absolute;
-  right: 104px;
-  left: auto;
-  top: 50%;
+  position: relative;
   z-index: 4;
-  /* Size from the message's natural (unwrapped) width. `fit-content` together
-     with `overflow-wrap:anywhere` can collapse to a one-character column;
-     `max-content` grows first and only wraps once the cap is reached. */
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
   width: max-content;
-  box-sizing: border-box;
   max-width: 360px;
-  /* Prefer growing the transparent shell so a complete result is visible;
-     scrolling is only a fallback for unusually long model output. */
-  max-height: 396px;
+  max-height: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   padding: 8px 10px 9px;
   border: 1.5px solid #e4fb78;
   border-radius: 14px 14px 14px 6px;
   background: linear-gradient(155deg, #e8fc88 0%, var(--accent) 42%, #a9c949 100%);
   box-shadow:
     0 1px 0 #ffffffaa inset,
-    0 8px 18px #00000055,
-    0 0 0 1px #d7f25a22;
+    0 4px 10px #00000040;
   color: #1a2610;
-  transform: translateY(-54%);
   -webkit-app-region: no-drag;
-  animation: speech-pop 0.35s var(--ease-spring) both;
+  animation: speech-pop 0.22s var(--ease-out) both;
 }
 
 .floating-speech::after {
   content: "";
   position: absolute;
-  right: -7px;
+  right: -6px;
   top: 50%;
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
+  margin-top: -5px;
   border-right: 1.5px solid #e4fb78;
   border-bottom: 1.5px solid #e4fb78;
   background: linear-gradient(135deg, transparent 42%, #c8e85a 42%);
-  transform: translateY(-50%) rotate(-45deg);
+  transform: rotate(-45deg);
 }
 
 .floating-speech-meta {
@@ -627,6 +629,7 @@ html.floating-mode #root {
   align-items: center;
   gap: 6px;
   margin-bottom: 4px;
+  flex: none;
 }
 
 .floating-speech-meta strong {
@@ -649,9 +652,10 @@ html.floating-mode #root {
 
 .floating-speech p {
   margin: 0;
+  flex: 1 1 auto;
+  min-height: 0;
   width: max-content;
   max-width: 100%;
-  max-height: 332px;
   overflow-x: hidden;
   overflow-y: auto;
   color: #1c2812;
@@ -691,53 +695,54 @@ html.floating-mode #root {
   background: #00000022;
 }
 
-/* Compact spirit pet — no panel, no mask. */
+/* Compact spirit pet — 2D only, stays inside the fixed canvas. */
 .floating-pet {
-  position: absolute;
-  left: auto;
-  right: 8px;
-  top: 50%;
-  /* Keep the companion visibly behind the speech bubble and its text. */
+  position: relative;
   z-index: 2;
-  width: 96px;
-  height: 96px;
+  flex: none;
+  width: 88px;
+  height: 88px;
   display: grid;
   place-items: center;
-  transform: translateY(-50%);
-  transform-style: preserve-3d;
-  perspective: 700px;
+  overflow: hidden;
   background: transparent;
 }
-
 
 .floating-pet .bot-orbit {
   left: 50%;
   top: 50%;
+  animation: none;
 }
 
 .floating-pet .orbit-one {
-  width: 108px;
-  height: 42px;
+  width: 78px;
+  height: 30px;
   border-color: #d7f25a33;
+  transform: translate(-50%, -50%) rotate(-18deg);
 }
 
 .floating-pet .orbit-two {
-  width: 132px;
-  height: 56px;
+  width: 86px;
+  height: 36px;
   border-color: #d7f25a22;
   opacity: 0.5;
+  transform: translate(-50%, -50%) rotate(24deg);
 }
 
 .floating-pet .bubble-bot {
   width: 72px;
   height: 58px;
-  transform: translateY(2px) rotate(-5deg) translateZ(16px);
-  animation: bot-float 3.6s ease-in-out infinite;
+  transform: translateY(2px) rotate(-5deg);
+  animation: pet-float 3.6s ease-in-out infinite;
 }
 
 .floating-shell.is-active .floating-pet .bubble-bot {
-  animation: bot-work 1.8s ease-in-out infinite;
-  filter: drop-shadow(0 0 12px #d7f25a55);
+  animation: pet-work 1.8s ease-in-out infinite;
+  box-shadow:
+    0 1px 0 #ffffff88 inset,
+    0 -8px 16px #5a702018 inset,
+    0 0 0 8px #d7f25a12,
+    0 8px 16px #d7f25a33;
 }
 
 .floating-pet .bot-eye {
@@ -891,10 +896,28 @@ html.floating-mode #root {
 @keyframes speech-pop {
   from {
     opacity: 0;
-    transform: translateY(-54%) translateX(8px) scale(0.92);
   }
   to {
     opacity: 1;
-    transform: translateY(-54%) translateX(0) scale(1);
+  }
+}
+
+@keyframes pet-float {
+  0%,
+  100% {
+    transform: translateY(2px) rotate(-5deg);
+  }
+  50% {
+    transform: translateY(-4px) rotate(-2deg);
+  }
+}
+
+@keyframes pet-work {
+  0%,
+  100% {
+    transform: translateY(2px) rotate(-4deg);
+  }
+  50% {
+    transform: translateY(-5px) rotate(-1deg);
   }
 }

@@ -28,13 +28,10 @@ const LLAMA_ENDPOINT: &str = "http://[IP]:8765/v1/chat/completions";
 const DEFAULT_GOAL: &str = "描述当前屏幕上的关键可见内容";
 const FLOATING_LABEL: &str = "floating";
 /// Compact transparent pet window: speech bubble sits beside the spirit.
-/// The spirit is pinned to the right; the canvas grows left for long text.
-const FLOATING_WIDTH: f64 = 508.0;
-const FLOATING_HEIGHT: f64 = 148.0;
-const FLOATING_MIN_WIDTH: f64 = 216.0;
-const FLOATING_MAX_WIDTH: f64 = 540.0;
-const FLOATING_MIN_HEIGHT: f64 = 120.0;
-const FLOATING_MAX_HEIGHT: f64 = 420.0;
+/// Size is fixed so the native window is never resized while text streams
+/// in — live set_size + set_position on a transparent WebView tears.
+const FLOATING_WIDTH: f64 = 496.0;
+const FLOATING_HEIGHT: f64 = 176.0;
 
 // --- P0: streamed display throttle (sentence-first, then 120–200 ms) ---
 const FLUSH_FIRST_CHARS: usize = 26;
@@ -1652,7 +1649,8 @@ fn ensure_floating_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     )
     .title("baodou")
     .inner_size(FLOATING_WIDTH, FLOATING_HEIGHT)
-    .min_inner_size(FLOATING_MIN_WIDTH, FLOATING_MIN_HEIGHT)
+    .min_inner_size(FLOATING_WIDTH, FLOATING_HEIGHT)
+    .max_inner_size(FLOATING_WIDTH, FLOATING_HEIGHT)
     .visible(false)
     .always_on_top(true)
     .decorations(false)
@@ -1711,32 +1709,10 @@ fn show_floating_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn resize_floating_window(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
-    let window = ensure_floating_window(&app)?;
-    let width = width.clamp(FLOATING_MIN_WIDTH, FLOATING_MAX_WIDTH);
-    let height = height.clamp(FLOATING_MIN_HEIGHT, FLOATING_MAX_HEIGHT);
-
-    // Keep the spirit where it is: pin the right edge and vertical center,
-    // then let the bubble grow or shrink on the left.
-    let scale = window.scale_factor().unwrap_or(1.0);
-    match (window.outer_position(), window.inner_size()) {
-        (Ok(pos), Ok(size)) => {
-            let current_w = f64::from(size.width) / scale;
-            let current_h = f64::from(size.height) / scale;
-            let current_x = f64::from(pos.x) / scale;
-            let current_y = f64::from(pos.y) / scale;
-            let x = current_x + current_w - width;
-            let y = current_y + (current_h - height) / 2.0;
-            window
-                .set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, height)))
-                .map_err(|e| format!("设置悬浮窗尺寸失败：{e}"))?;
-            window
-                .set_position(Position::Logical(LogicalPosition::new(x, y)))
-                .map_err(|e| format!("定位悬浮窗失败：{e}"))?;
-            Ok(())
-        }
-        _ => position_floating_window(&app, &window, width, height),
-    }
+fn resize_floating_window(_app: AppHandle, _width: f64, _height: f64) -> Result<(), String> {
+    // Overlay size is fixed. Growing the bubble in CSS avoids compositor
+    // tearing from set_size + set_position on a transparent WebView.
+    Ok(())
 }
 
 #[tauri::command]
