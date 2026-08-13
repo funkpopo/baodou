@@ -1,16 +1,19 @@
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, ImageFormat};
+mod capture;
+mod sampling;
+mod textsim;
+
+use capture::ScreenFrame;
 use reqwest::blocking::Client;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     env, fs,
-    io::{BufRead, BufReader, Cursor},
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{
     menu::{Menu, MenuItem},
@@ -19,24 +22,42 @@ use tauri::{
     WebviewWindowBuilder, WindowEvent,
 };
 use uuid::Uuid;
-use xcap::Monitor;
 
 const PROTOCOL_VERSION: &str = "2.0.0";
-const LLAMA_ENDPOINT: &str = "http://127.0.0.1:8765/v1/chat/completions";
+const LLAMA_ENDPOINT: &str = "http://[IP]:8765/v1/chat/completions";
 const DEFAULT_GOAL: &str = "描述当前屏幕上的关键可见内容";
 const FLOATING_LABEL: &str = "floating";
 /// Compact transparent pet window: speech bubble sits beside the spirit.
 const FLOATING_WIDTH: f64 = 282.0;
 const FLOATING_HEIGHT: f64 = 148.0;
 const FLOATING_MIN_WIDTH: f64 = 248.0;
-const FLOATING_MAX_WIDTH: f64 = 420.0;
+// Allows recognition summaries to use fewer lines while preserving the
+// dedicated lane occupied by the floating companion.
+const FLOATING_MAX_WIDTH: f64 = 500.0;
 const FLOATING_MIN_HEIGHT: f64 = 120.0;
-const FLOATING_MAX_HEIGHT: f64 = 276.0;
-const CAPTURE_WIDTH: u32 = 768;
-const CAPTURE_HEIGHT: u32 = 432;
-const JPEG_QUALITY: u8 = 78;
-const TARGET_FRAME_INTERVAL: Duration = Duration::from_millis(900);
-const CHANGE_THRESHOLD: u32 = 7;
+const FLOATING_MAX_HEIGHT: f64 = 420.0;
+
+// --- P0: streamed display throttle (sentence-first, then 120–200 ms) ---
+const FLUSH_FIRST_CHARS: usize = 26;
+const FLUSH_THROTTLE: Duration = Duration::from_millis(150);
+const FLUSH_FORCE_TIMEOUT: Duration = Duration::from_millis(1600);
+/// Leave enough room for a complete visual summary.  Some local vision models
+/// emit additional visible context despite the concise prompt, and a 160-token
+/// ceiling can cut a Chinese sentence off mid-way.
+const MAX_RECOGNITION_TOKENS: u32 = 512;
+
+// --- P1: sampling & refresh policies (in addition to `sampling` module) ---
+/// Above this share of the screen a changed bbox is treated as a broad change
+/// and sent immediately; below it the change is "small" and needs confirmation.
+const SIGNIFICANT_AREA_FRACTION: f64 = 0.06;
+/// A localised change at most this large is sent as a high-density crop.
+const CROP_MAX_AREA_FRACTION: f64 = 0.30;
+/// Minimum gap between two model requests to protect a small local server.
+const MIN_MODEL_GAP: Duration = Duration::from_millis(600);
+/// After a low-information result, small changes are ignored for this long.
+const LOW_INFO_SUPPRESS: Duration = Duration::from_millis(6000);
+/// After a conservative contradiction message, re-report only after this long.
+const CONTRADICTION_COOLDOWN: Duration = Duration::from_millis(12000);
 const TRAY_SHOW_ID: &str = "show-main";
 const TRAY_EXIT_ID: &str = "quit";
 
@@ -68,6 +89,24 @@ struct ModelConfig {
     model_path: String,
     mmproj_path: String,
     llama_url: String,
+    /// P3 server tuning knobs. They never touch the context length `-c`:
+    /// only offload, batch, thread and Flash Attention parameters.
+    #[serde(default)]
+    n_gpu_layers: Option<i32>,
+    #[serde(default)]
+    batch_size: Option<i32>,
+    #[serde(default)]
+    ubatch_size: Option<i32>,
+    #[serde(default)]
+    flash_attn: bool,
+    /// Opt-in single-request multi-image ("thumbnail + crop"). Off by default
+    /// until multi-image input is verified stable on the deployed model.
+    #[serde(default = "default_false")]
+    multi_image_input: bool,
+}
+
+fn default_false() -> bool {
+    false
 }
 
 impl Default for ModelConfig {
@@ -91,8 +130,27 @@ impl Default for ModelConfig {
                 .to_string_lossy()
                 .into(),
             llama_url: env::var("BAODOU_LLAMA_URL").unwrap_or_else(|_| LLAMA_ENDPOINT.into()),
+            n_gpu_layers: env_i32("BAODOU_N_GPU_LAYERS"),
+            batch_size: env_i32("BAODOU_BATCH_SIZE"),
+            ubatch_size: env_i32("BAODOU_UBATCH_SIZE"),
+            flash_attn: env_flag("BAODOU_FLASH_ATTN"),
+            multi_image_input: env_flag("BAODOU_MULTI_IMAGE"),
         }
     }
+}
+
+fn env_i32(key: &str) -> Option<i32> {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+}
+
+fn env_flag(key: &str) -> bool {
+    env::var(key)
+        .map(|value| {
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Serialize)]
@@ -108,6 +166,34 @@ struct RuntimeSnapshot {
     task_id: Option<String>,
     goal: Option<String>,
     message: String,
+    /// Live counters for benchmark / acceptance runs.
+    rounds: u64,
+    skipped_rounds: u64,
+    requests: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metrics: Option<OpsMetrics>,
+}
+
+/// P3 per-request breakdown: where time actually goes.
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpsMetrics {
+    capture_ms: Option<f64>,
+    encode_ms: Option<f64>,
+    /// Request connect + send + prefill + first token.
+    first_token_ms: Option<f64>,
+    /// Remaining generation (first token … stream end).
+    generate_ms: Option<f64>,
+    total_ms: Option<f64>,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    /// Readability of the last published result.
+    readability: Option<String>,
+    /// Whether the request used a full-screen thumbnail or a localised crop.
+    input_kind: Option<String>,
+    /// Summarised llama-server /metrics scrape.
+    server: Option<String>,
+    error: Option<String>,
 }
 
 impl Default for RuntimeSnapshot {
@@ -123,6 +209,10 @@ impl Default for RuntimeSnapshot {
             task_id: None,
             goal: None,
             message: "本地屏幕识别运行时已就绪".into(),
+            rounds: 0,
+            skipped_rounds: 0,
+            requests: 0,
+            metrics: None,
         }
     }
 }
@@ -154,8 +244,13 @@ struct FloatingMessage {
     updated_at: String,
 }
 
-struct ScreenFrame {
-    jpeg_base64: String,
+/// Result of one recognition round, alongside its streamed timing breakdown.
+struct RecognizeResult {
+    text: String,
+    first_token_ms: Option<f64>,
+    generate_ms: Option<f64>,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
 }
 
 /// Extract text from the response shapes used by OpenAI-compatible vision
@@ -250,6 +345,48 @@ fn stream_delta_text(value: &serde_json::Value) -> Option<String> {
             "choices": [{ "message": { "content": delta } }]
         })),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    #[test]
+    fn first_flush_wait_for_sentence_boundary_then_throttle() {
+        let mut flusher = StreamFlusher::new();
+        // Short partial text without a boundary stays silent.
+        assert!(flusher.feed("正在读取").is_none());
+        // A sentence boundary triggers the first display.
+        let first = flusher
+            .feed("正在读取系统状态。")
+            .expect("flush on boundary");
+        assert_eq!(first, "正在读取系统状态。");
+        // Identical length (no new content) produces nothing.
+        assert!(flusher.feed("正在读取系统状态。").is_none());
+        // A small new chunk without a boundary is held back.
+        assert!(flusher.feed("正在读取系统状态。已连接").is_none());
+    }
+
+    #[test]
+    fn long_stream_without_boundary_force_flushes_with_ellipsis() {
+        let mut flusher = StreamFlusher::new();
+        assert!(flusher.feed("正在").is_none());
+        // Enough characters without a terminator force a provisional flush.
+        let long = "正在进行系统初始化并加载用户配置且正在同步远程数据窗口显示";
+        let display = flusher.feed(long).expect("block flush");
+        assert!(display.contains(long));
+        assert!(display.ends_with('…'));
+    }
+
+    #[test]
+    fn final_without_terminal_text_is_marked_provisional() {
+        let mut flusher = StreamFlusher::new();
+        assert!(flusher.feed("一切正常").is_none());
+        let long = "一切正常没有异常需要处理请稍候等待状态更新完毕后再继续操作";
+        let display = flusher.feed(long).expect("flush");
+        assert!(display.contains(long));
+        assert!(display.ends_with('…'));
     }
 }
 
@@ -544,6 +681,11 @@ fn set_model_config(app: AppHandle, config: ModelConfig) -> Result<ModelConfig, 
         model_path: config.model_path.trim().into(),
         mmproj_path: config.mmproj_path.trim().into(),
         llama_url: config.llama_url.trim().into(),
+        n_gpu_layers: config.n_gpu_layers,
+        batch_size: config.batch_size,
+        ubatch_size: config.ubatch_size,
+        flash_attn: config.flash_attn,
+        multi_image_input: config.multi_image_input,
     };
     persist_model_config(&config)?;
     stop_model(&app);
@@ -698,26 +840,44 @@ fn start_model(app: AppHandle) {
         snapshot.message = "正在启动本地视觉模型…".into();
     });
 
+    let mut args = vec![
+        "-m".to_string(),
+        model.to_string_lossy().into_owned(),
+        "--mmproj".to_string(),
+        mmproj.to_string_lossy().into_owned(),
+        "--host".to_string(),
+        host.to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--jinja".to_string(),
+        // Context length is intentionally left at 4096: the tuning pass below
+        // must not modify `-c`.  A too-small context can make llama.cpp stop
+        // before producing an answer, so keep this value stable.
+        "-c".to_string(),
+        "4096".to_string(),
+        "--threads".to_string(),
+        "6".to_string(),
+    ];
+    // P3 server tuning knobs: GPU offload, batch sizes and Flash Attention.
+    if let Some(ngl) = config.n_gpu_layers {
+        args.push("-ngl".to_string());
+        args.push(ngl.to_string());
+    }
+    if let Some(batch) = config.batch_size {
+        args.push("-b".to_string());
+        args.push(batch.to_string());
+    }
+    if let Some(batch) = config.ubatch_size {
+        args.push("-ub".to_string());
+        args.push(batch.to_string());
+    }
+    if config.flash_attn {
+        args.push("-fa".to_string());
+    }
+
     match Command::new(&server)
         .current_dir(server.parent().unwrap_or_else(|| Path::new(".")))
-        .args([
-            "-m",
-            model.to_string_lossy().as_ref(),
-            "--mmproj",
-            mmproj.to_string_lossy().as_ref(),
-            "--host",
-            host,
-            "--port",
-            port,
-            "--jinja",
-            "-c",
-            // Vision tokens for a screen image plus a short answer need more
-            // room than the former 2K context.  A too-small context can make
-            // llama.cpp stop before it reaches the answer.
-            "4096",
-            "--threads",
-            "6",
-        ])
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -763,61 +923,161 @@ fn supervise_model(app: AppHandle) {
     }
 }
 
-/// Captures the original screen into lossless PNG first, then downsamples and
-/// encodes the model input.  This preserves every source pixel through the
-/// capture/compression stage before resolution reduction determines the final
-/// inference budget.
-fn capture_primary() -> Result<(ScreenFrame, u64), String> {
-    let monitor = Monitor::all()
-        .map_err(|e| format!("枚举显示器失败：{e}"))?
-        .into_iter()
-        .find(|m| m.is_primary().unwrap_or(false))
-        .ok_or_else(|| "没有检测到主显示器".to_string())?;
-    let image = monitor
-        .capture_image()
-        .map_err(|e| format!("屏幕采集失败：{e}"))?;
-    let original = DynamicImage::ImageRgba8(image);
-    let mut lossless_png = Vec::new();
-    original
-        .write_to(&mut Cursor::new(&mut lossless_png), ImageFormat::Png)
-        .map_err(|e| format!("无损截图压缩失败：{e}"))?;
-    let lossless = image::load_from_memory_with_format(&lossless_png, ImageFormat::Png)
-        .map_err(|e| format!("无损截图读取失败：{e}"))?;
-    let scaled = lossless.resize(CAPTURE_WIDTH, CAPTURE_HEIGHT, FilterType::Triangle);
-    let signature = frame_signature(&scaled);
-    let mut jpeg = Vec::new();
-    JpegEncoder::new_with_quality(&mut jpeg, JPEG_QUALITY)
-        .encode_image(&scaled)
-        .map_err(|e| format!("图像编码失败：{e}"))?;
-    Ok((
-        ScreenFrame {
-            jpeg_base64: BASE64.encode(jpeg),
-        },
-        signature,
-    ))
+/// Scrapes llama.cpp's Prometheus `/metrics` endpoint for the performance
+/// counters most useful to the P3 benchmark pass: prompt eval, token eval,
+/// cache hits and KV usage.  Only a short summary is kept in memory; the raw
+/// endpoint name list is deliberately version-tolerant.
+fn server_metrics(endpoint: &str) -> Option<String> {
+    let base = endpoint.split("/v1/").next()?;
+    if base.is_empty() {
+        return None;
+    }
+    let url = format!("{base}/metrics");
+    let text = local_http_client(endpoint, Duration::from_secs(3))
+        .ok()?
+        .get(&url)
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .text()
+        .ok()?;
+    const INTERESTING: &[&str] = &[
+        "n_prompt_tokens",
+        "n_predicted",
+        "prompt_per_second",
+        "predicted_per_second",
+        "prompt_cache",
+        "cache_hit",
+        "kv_cache_usage",
+        "kv_cache_tokens",
+        "t_prompt",
+        "t_predict",
+        "n_prompt_eval",
+        "slot_processing",
+    ];
+    let mut summary = Vec::with_capacity(12);
+    for line in text.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let name = line.split_whitespace().next().unwrap_or_default();
+        if INTERESTING
+            .iter()
+            .any(|key| name.to_ascii_lowercase().contains(key))
+        {
+            summary.push(name.to_string());
+            if summary.len() >= 12 {
+                break;
+            }
+        }
+    }
+    if summary.is_empty() {
+        return None;
+    }
+    Some(summary.join(", "))
 }
 
-/// An 8 × 8 luminance fingerprint is intentionally inexpensive and robust to
-/// cursor blinking / minor animations.  It lets the loop skip inference for
-/// visually unchanged frames, which is the largest latency win in real use.
-fn frame_signature(image: &DynamicImage) -> u64 {
-    let small = image.resize_exact(8, 8, FilterType::Triangle).to_luma8();
-    let mean = small.pixels().map(|pixel| u32::from(pixel[0])).sum::<u32>() / 64;
-    small
-        .pixels()
-        .enumerate()
-        .fold(0_u64, |signature, (index, pixel)| {
-            signature | (u64::from(u32::from(pixel[0]) >= mean) << index)
-        })
+fn poll_server_metrics(app: AppHandle) {
+    loop {
+        std::thread::sleep(Duration::from_secs(3));
+        let endpoint = load_model_config().llama_url;
+        if !llama_health(&endpoint) {
+            continue;
+        }
+        let Some(summary) = server_metrics(&endpoint) else {
+            continue;
+        };
+        update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+            let metrics = snapshot.metrics.get_or_insert_default();
+            metrics.server = Some(summary);
+        });
+        let _ = app.emit("recognition-metrics", &());
+    }
 }
 
-fn signature_distance(left: u64, right: u64) -> u32 {
-    (left ^ right).count_ones()
+/// P0 streamed display throttle: instead of forwarding every token delta, the
+/// bubble only updates on a sentence boundary, on a ~26 char block, on a
+/// 150 ms cadence, or when a force-flush timeout fires for long sentences.
+/// The final (uncorrected) result is always sent once by the caller.
+struct StreamFlusher {
+    flushed: usize,
+    last_flush: Instant,
+    last_force: Instant,
+    first: bool,
+}
+
+impl StreamFlusher {
+    fn new() -> Self {
+        Self {
+            flushed: 0,
+            last_flush: Instant::now(),
+            last_force: Instant::now(),
+            first: true,
+        }
+    }
+
+    /// Feeds the latest cleaned text; returns the display text to render when
+    /// the throttling policy says it is time (or `None` to stay silent).
+    fn feed(&mut self, text: &str) -> Option<String> {
+        let total = text.chars().count();
+        if total <= self.flushed {
+            return None;
+        }
+        let new_chars = total - self.flushed;
+        let new_text: String = text.chars().skip(self.flushed).collect();
+        let now = Instant::now();
+
+        let boundary = has_sentence_boundary(&new_text);
+        let flush = boundary
+            || (new_chars >= FLUSH_FIRST_CHARS
+                && (self.first || now.duration_since(self.last_flush) >= FLUSH_THROTTLE))
+            || (now.duration_since(self.last_force) >= FLUSH_FORCE_TIMEOUT && new_chars > 0);
+        if !flush {
+            return None;
+        }
+
+        let provisional = !boundary && !ends_with_terminal(text);
+        let mut display = text.to_string();
+        if provisional {
+            display.push('…');
+        }
+        self.flushed = total;
+        self.last_flush = now;
+        self.last_force = now;
+        self.first = false;
+        Some(display)
+    }
+}
+
+fn has_sentence_boundary(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(
+            c,
+            '。' | '！' | '？' | '!' | '?' | '；' | ';' | '\n' | '\r' | '…'
+        )
+    })
+}
+
+fn ends_with_terminal(text: &str) -> bool {
+    text.chars().last().is_some_and(|c| {
+        matches!(
+            c,
+            '。' | '！' | '？' | '!' | '?' | '；' | ';' | '…' | '\n' | '\r'
+        )
+    })
 }
 
 fn recognition_prompt(query: &str) -> String {
     format!(
-        "/no_think\n你是 Baodou，一位常驻用户桌面的本地 AI 伴侣。你的气质温暖、沉稳、敏锐，像可靠的伙伴一样主动理解屏幕，但绝不虚构看不见的内容。此消息附有一张刚截取的屏幕图片，必须直接观察图片作答。用户当前关注：{query}\n用自然、友好的中文说明当前画面中相关的内容和变化；可以在必要时提醒值得注意的信息。不要给出点击、输入、打开、关闭等操作步骤，不要输出坐标或 ACTION。最多三句、120字；图片不清晰时坦诚说明。"
+        "/no_think\n你是 Baodou，一位常驻用户桌面的本地 AI 伴侣，气质温暖、沉稳、敏锐，善于观察但绝不虚构看不见的内容。此消息附有一张刚截取的屏幕图片，请直接观察图片作答。用户当前关注：{query}\n\
+        回答要求：\n\
+        1. 第一句给出当前画面上最重要且最明确的可见状态或内容。\n\
+        2. 第二句补充 1–2 项与当前关注点直接相关的信息。\n\
+        3. 只依据这一张截图作答；单张截图无法观察到时间上的“变化”，不要声称看到了过程或前后的变化。\n\
+        4. 模糊、小字、图标或数字无法确认时，如实说明“看不清/无法确认”，严禁补全、猜测或推测用户的意图。\n\
+        5. 禁止给出点击、输入、打开、关闭等操作步骤，禁止输出坐标或 ACTION。\n\
+        最多两句、短而完整的中文摘要。"
     )
 }
 
@@ -826,33 +1086,33 @@ fn recognize(
     query: &str,
     frame: &ScreenFrame,
     mut on_delta: impl FnMut(&str),
-) -> Result<String, String> {
+) -> Result<RecognizeResult, String> {
     let prompt = format!("{}\n当前截图：", recognition_prompt(query));
-    let mut messages = Vec::with_capacity(1);
-    messages.push(json!({
-        "role": "user",
-        "content": [
-            { "type": "text", "text": prompt },
-            {
-                "type": "image_url",
-                "image_url": { "url": format!("data:image/jpeg;base64,{}", frame.jpeg_base64) }
-            }
-        ]
-    }));
+    let mut content = Vec::with_capacity(frame.images.len() + 1);
+    content.push(json!({ "type": "text", "text": prompt }));
+    for image in &frame.images {
+        content.push(json!({
+            "type": "image_url",
+            "image_url": { "url": format!("{}{}", image.mime, image.base64) }
+        }));
+    }
     let payload = json!({
         "model": "local-vision",
         // Qwen can otherwise spend its visible output budget in hidden
         // reasoning phase, leaving `content` empty and returning `length`.
         "temperature": 0.1,
-        "max_tokens": 384,
+        // The prompt asks for a concise answer, but do not use a ceiling so
+        // tight that a model ends a visible sentence half-way through.
+        "max_tokens": MAX_RECOGNITION_TOKENS,
         // The static instruction prefix is reused on every frame by llama.cpp.
         "cache_prompt": true,
         "stream": true,
         "reasoning_format": "none",
         "chat_template_kwargs": { "enable_thinking": false },
-        "messages": messages
+        "messages": [ { "role": "user", "content": content } ]
     });
 
+    let send_started = Instant::now();
     let response = local_http_client(endpoint, Duration::from_secs(12))
         .map_err(|e| e.to_string())?
         .post(endpoint)
@@ -862,8 +1122,11 @@ fn recognize(
         .error_for_status()
         .map_err(|e| format!("模型接口错误：{e}"))?;
 
+    let mut flusher = StreamFlusher::new();
     let mut raw_text = String::new();
-    let mut visible_text = String::new();
+    let mut first_byte: Option<Instant> = None;
+    let mut prompt_tokens = None;
+    let mut completion_tokens = None;
     for line in BufReader::new(response).lines() {
         let line = line.map_err(|e| format!("读取流式模型响应失败：{e}"))?;
         let Some(data) = line.strip_prefix("data:") else {
@@ -873,20 +1136,53 @@ fn recognize(
         if data == "[DONE]" {
             break;
         }
+        if first_byte.is_none() {
+            first_byte = Some(Instant::now());
+        }
         let chunk: serde_json::Value =
             serde_json::from_str(data).map_err(|e| format!("模型流式响应解析失败：{e}"))?;
         if let Some(delta) = stream_delta_text(&chunk) {
             raw_text.push_str(&delta);
-            let cleaned = strip_thinking(&raw_text);
-            if !cleaned.is_empty() && cleaned != visible_text {
-                visible_text = cleaned;
-                on_delta(&visible_text);
-            }
+        }
+        if let Some(value) = chunk
+            .pointer("/usage/prompt_tokens")
+            .and_then(|v| v.as_u64())
+        {
+            prompt_tokens = Some(value);
+        }
+        if let Some(value) = chunk
+            .pointer("/usage/completion_tokens")
+            .and_then(|v| v.as_u64())
+        {
+            completion_tokens = Some(value);
+        }
+        let cleaned = strip_thinking(&raw_text);
+        if let Some(display) = flusher.feed(&cleaned) {
+            on_delta(&display);
         }
     }
 
-    (!visible_text.is_empty())
-        .then_some(visible_text)
+    let final_text = strip_thinking(&raw_text);
+    // The final result is always delivered once as a correction pass, even if
+    // the throttled flusher already emitted a provisional (or identical) blob.
+    if !final_text.is_empty() {
+        on_delta(&final_text);
+    }
+
+    let done = Instant::now();
+    let first_token_ms = first_byte.map(|t| t.duration_since(send_started).as_secs_f64() * 1000.0);
+    let generate_ms = first_byte
+        .map(|t| done.duration_since(t).as_secs_f64() * 1000.0)
+        .or_else(|| Some(done.duration_since(send_started).as_secs_f64() * 1000.0));
+
+    (!final_text.is_empty())
+        .then_some(RecognizeResult {
+            text: final_text,
+            first_token_ms,
+            generate_ms,
+            prompt_tokens,
+            completion_tokens,
+        })
         .ok_or_else(|| "模型已收到屏幕截图，但没有生成识别内容".to_string())
 }
 
@@ -979,95 +1275,353 @@ fn run_task(
     Ok("started".into())
 }
 
+struct SmallCandidate {
+    /// The fine cells that changed.
+    cells: Vec<usize>,
+    /// Consecutive frames with the same small change.
+    frames: u32,
+    seen_at: Instant,
+}
+
+impl SmallCandidate {
+    fn new(cells: Vec<usize>, now: Instant) -> Self {
+        Self {
+            cells,
+            frames: 1,
+            seen_at: now,
+        }
+    }
+}
+
+fn same_cell_set(left: &[usize], right: &[usize]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut sorted_left = left.to_vec();
+    let mut sorted_right = right.to_vec();
+    sorted_left.sort_unstable();
+    sorted_right.sort_unstable();
+    sorted_left == sorted_right
+}
+
+fn wait_until(started: Instant, target: Duration) {
+    let elapsed = started.elapsed();
+    if elapsed < target {
+        std::thread::sleep(target - elapsed);
+    }
+}
+
+fn count_round(app: &AppHandle) {
+    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+        snapshot.rounds = snapshot.rounds.saturating_add(1);
+    });
+}
+
+fn count_skipped(app: &AppHandle) {
+    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+        snapshot.skipped_rounds = snapshot.skipped_rounds.saturating_add(1);
+    });
+}
+
+fn count_request(app: &AppHandle) {
+    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+        snapshot.requests = snapshot.requests.saturating_add(1);
+    });
+}
+
+fn persist_latest_result(task_id: &str, text: &str) {
+    let timestamp = now();
+    if let Ok(db) = database() {
+        let _ = db.execute(
+            "UPDATE sessions SET latest_result = ?1, updated_at = ?2 WHERE id = ?3",
+            params![text, timestamp, task_id],
+        );
+    }
+}
+
+fn readability_label(kind: textsim::Readability) -> &'static str {
+    match kind {
+        textsim::Readability::Clear => "清晰可读",
+        textsim::Readability::Partial => "局部可读",
+        textsim::Readability::Unclear => "不宜判断",
+    }
+}
+
+fn record_metrics(app: &AppHandle, mut metrics: OpsMetrics) {
+    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+        let previous_server = snapshot.metrics.as_ref().and_then(|m| m.server.clone());
+        metrics.server = previous_server;
+        snapshot.metrics = Some(metrics.clone());
+    });
+    let _ = app.emit("recognition-metrics", &metrics);
+}
+
 fn recognition_loop(app: AppHandle, task_id: String, goal: String) {
-    let endpoint = load_model_config().llama_url;
-    let mut last = String::new();
-    let mut previous_signature = None;
+    use capture::{area_fraction, capture_primary, change_bbox};
+    use sampling::Motion;
+
+    let config = load_model_config();
+    let endpoint = config.llama_url;
+    let multi_image = config.multi_image_input;
+
+    let mut sampler = sampling::AdaptiveSampler::default();
+    let mut last_text = String::new();
+    let mut previous_coarse: Option<Vec<u64>> = None;
+    let mut previous_fine: Option<Vec<u64>> = None;
+    let mut small_candidate: Option<SmallCandidate> = None;
+    let mut last_request_at = Instant::now() - Duration::from_secs(3600);
+    let mut low_info_suppress_until = Instant::now();
+    let mut contradiction_suppress_until = Instant::now();
 
     while task_active(&app, &task_id) {
-        let frame_started = std::time::Instant::now();
-        let captured = capture_primary();
-        let (frame, signature) = match captured {
+        let frame_started = Instant::now();
+
+        let capture_started = Instant::now();
+        let captured = match capture_primary() {
             Ok(frame) => frame,
             Err(error) => {
                 update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
                     snapshot.message = error.clone();
                 });
                 emit_floating(&app, format!("识别暂不可用：{error}"), "error");
+                sampler.note_error();
+                wait_until(frame_started, sampler.error_backoff());
                 continue;
             }
         };
+        let capture_ms = capture_started.elapsed().as_secs_f64() * 1000.0;
 
-        if previous_signature
-            .is_some_and(|previous| signature_distance(previous, signature) < CHANGE_THRESHOLD)
-        {
-            // Do not spend a full VLM request on a frame that has not
-            // materially changed.  Keep the displayed result stable instead.
-            let elapsed = frame_started.elapsed();
-            if elapsed < TARGET_FRAME_INTERVAL {
-                std::thread::sleep(TARGET_FRAME_INTERVAL - elapsed);
+        let is_first = previous_fine.is_none();
+        let fine_changed = match &previous_fine {
+            Some(previous) => {
+                capture::changed_cells(previous, &captured.fine, capture::FINE_CELL_THRESHOLD)
             }
+            None => (0..captured.fine.len()).collect(),
+        };
+        let coarse_changed = match &previous_coarse {
+            Some(previous) => {
+                capture::changed_cells(previous, &captured.coarse, capture::COARSE_CELL_THRESHOLD)
+            }
+            None => (0..captured.coarse.len()).collect(),
+        };
+        let bbox = change_bbox(
+            &fine_changed,
+            capture::FINE_COLS,
+            capture::FINE_ROWS,
+            captured.thumb_width,
+            captured.thumb_height,
+        );
+        let area = bbox
+            .map(|b| area_fraction(&b, captured.thumb_width, captured.thumb_height))
+            .unwrap_or(0.0);
+        previous_coarse = Some(captured.coarse.clone());
+        previous_fine = Some(captured.fine.clone());
+
+        if fine_changed.is_empty() && !is_first {
+            count_round(&app);
+            count_skipped(&app);
+            sampler.note_idle();
+            wait_until(frame_started, sampler.next_interval(Motion::Idle, 0));
             continue;
         }
-        previous_signature = Some(signature);
 
-        match (|| {
-            let app_for_delta = app.clone();
-            let task_for_delta = task_id.clone();
-            recognize(&endpoint, &goal, &frame, move |text| {
-                if task_active(&app_for_delta, &task_for_delta) {
-                    emit_floating(&app_for_delta, text, "recognizing");
+        let motion = if coarse_changed.len() >= sampling::HIGH_MOTION_CELLS {
+            Motion::HighActivity
+        } else if area >= SIGNIFICANT_AREA_FRACTION || is_first {
+            Motion::Significant
+        } else {
+            Motion::Small
+        };
+
+        let round_time = Instant::now();
+        let mut send = false;
+        let mut crop_rect: Option<(u32, u32, u32, u32)> = None;
+
+        match motion {
+            Motion::HighActivity => {
+                // Video / scroll / animation: look less often but do not stop
+                // looking entirely, so a late popup or toast is still caught.
+                sampler.note_dynamic();
+                let scene_confirmed = sampler.is_dynamic_scene();
+                let gap_ok = round_time.duration_since(last_request_at) >= MIN_MODEL_GAP;
+                if !scene_confirmed || gap_ok {
+                    send = true;
                 }
-            })
-        })() {
-            Ok(text) => {
-                update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
-                    snapshot.model_ready = true;
-                    snapshot.message = text.clone();
-                });
-                if text != last {
-                    let timestamp = now();
-                    if let Ok(db) = database() {
-                        let _ = db.execute(
-                            "UPDATE sessions SET latest_result = ?1, updated_at = ?2 WHERE id = ?3",
-                            params![text, timestamp, task_id],
-                        );
+            }
+            Motion::Significant => {
+                sampler.note_change();
+                send = true;
+            }
+            Motion::Small => {
+                // Cursor blink / typing caret: confirm over a few frames and
+                // suppress that low-value chatter afterwards.
+                if let Some(candidate) = small_candidate.as_mut() {
+                    if same_cell_set(&candidate.cells, &fine_changed) {
+                        candidate.frames = candidate.frames.saturating_add(1);
+                        candidate.seen_at = round_time;
+                    } else {
+                        *candidate = SmallCandidate::new(fine_changed.clone(), round_time);
                     }
+                } else {
+                    small_candidate = Some(SmallCandidate::new(fine_changed.clone(), round_time));
+                }
+                let candidate = small_candidate.as_ref().expect("candidate just built");
+                let confirmed = candidate.frames >= 2;
+                let stable = candidate.frames >= 4;
+                let gap_ok = round_time.duration_since(last_request_at) >= MIN_MODEL_GAP;
+                if confirmed && !stable && gap_ok && round_time >= low_info_suppress_until {
+                    send = true;
+                } else {
+                    sampler.note_idle();
+                }
+            }
+            Motion::Idle => {}
+        }
+
+        // Localised change → high-density crop; global change → full screen.
+        if send && !is_first && area <= CROP_MAX_AREA_FRACTION {
+            crop_rect = bbox;
+        }
+
+        if !send {
+            count_round(&app);
+            count_skipped(&app);
+            wait_until(
+                frame_started,
+                sampler.next_interval(motion, coarse_changed.len()),
+            );
+            continue;
+        }
+
+        last_request_at = round_time;
+        count_round(&app);
+        count_request(&app);
+
+        let encode_started = Instant::now();
+        let input = match captured.build_input(crop_rect, multi_image) {
+            Ok(input) => input,
+            Err(error) => {
+                emit_floating(&app, format!("识别暂不可用：{error}"), "error");
+                wait_until(
+                    frame_started,
+                    sampler.next_interval(motion, coarse_changed.len()),
+                );
+                continue;
+            }
+        };
+        let encode_ms = encode_started.elapsed().as_secs_f64() * 1000.0;
+
+        let app_for_delta = app.clone();
+        let task_for_delta = task_id.clone();
+        let result = recognize(&endpoint, &goal, &input, move |text| {
+            if task_active(&app_for_delta, &task_for_delta) {
+                emit_floating(&app_for_delta, text, "recognizing");
+            }
+        });
+
+        let total_ms = frame_started.elapsed().as_secs_f64() * 1000.0;
+        match result {
+            Ok(result) => {
+                sampler.note_success();
+                let readability = textsim::classify_readability(&result.text);
+                let low_info = textsim::is_low_information(&result.text);
+
+                let contradicted = !last_text.is_empty()
+                    && round_time >= contradiction_suppress_until
+                    && textsim::contradicts(&last_text, &result.text);
+                if contradicted {
+                    // Consecutive results disagree: be conservative instead of
+                    // printing an apparently-firm but unstable fact.
+                    contradiction_suppress_until = round_time + CONTRADICTION_COOLDOWN;
+                    let conservative = "画面内容存在变化，但关键文字暂无法稳定确认。";
+                    emit_floating(&app, conservative, "recognizing");
+                    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+                        snapshot.model_ready = true;
+                        snapshot.message = conservative.into();
+                    });
+                    persist_latest_result(&task_id, conservative);
+                    last_text = result.text;
+                } else if textsim::should_refresh(&last_text, &result.text) {
+                    let timestamp = now();
+                    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+                        snapshot.model_ready = true;
+                        snapshot.message = result.text.clone();
+                    });
+                    persist_latest_result(&task_id, &result.text);
                     emit_recognition(
                         &app,
                         RecognitionEvent {
                             task_id: task_id.clone(),
                             phase: "recognizing".into(),
                             title: "屏幕识别结果".into(),
-                            detail: text.clone(),
+                            detail: result.text.clone(),
                             timestamp,
                             requires_confirmation: false,
                             complete: false,
                             ok: true,
                         },
                     );
-                    // The bubble has already received incremental text. Send
-                    // the final result too so it is correct even if no delta
-                    // was emitted by a compatible server.
-                    emit_floating(&app, text.clone(), "recognizing");
-                    last = text;
+                    emit_floating(&app, result.text.clone(), "recognizing");
+                    last_text = result.text;
                 }
+
+                if low_info {
+                    low_info_suppress_until = round_time + LOW_INFO_SUPPRESS;
+                } else {
+                    low_info_suppress_until = round_time;
+                }
+                record_metrics(
+                    &app,
+                    OpsMetrics {
+                        capture_ms: Some(capture_ms),
+                        encode_ms: Some(encode_ms),
+                        first_token_ms: result.first_token_ms,
+                        generate_ms: result.generate_ms,
+                        total_ms: Some(total_ms),
+                        prompt_tokens: result.prompt_tokens,
+                        completion_tokens: result.completion_tokens,
+                        readability: Some(readability_label(readability).into()),
+                        input_kind: Some(if input.full_screen() {
+                            "full".into()
+                        } else {
+                            "crop".into()
+                        }),
+                        server: None,
+                        error: None,
+                    },
+                );
             }
             Err(error) => {
+                // Service / parse errors are clearly separated from visual
+                // uncertainty by the message itself and by the error metric.
+                sampler.note_error();
                 update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
                     snapshot.message = error.clone();
                 });
                 emit_floating(&app, format!("识别暂不可用：{error}"), "error");
+                record_metrics(
+                    &app,
+                    OpsMetrics {
+                        capture_ms: Some(capture_ms),
+                        encode_ms: Some(encode_ms),
+                        first_token_ms: None,
+                        generate_ms: None,
+                        total_ms: Some(total_ms),
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        readability: None,
+                        input_kind: None,
+                        server: None,
+                        error: Some(error),
+                    },
+                );
             }
         }
 
-        // A fixed lower bound prevents continuous back-to-back requests from
-        // saturating the local server.  Slow inference is never overlapped,
-        // so no stale-frame queue can build up.
-        let elapsed = frame_started.elapsed();
-        if elapsed < TARGET_FRAME_INTERVAL {
-            std::thread::sleep(TARGET_FRAME_INTERVAL - elapsed);
-        }
+        wait_until(
+            frame_started,
+            sampler.next_interval(motion, coarse_changed.len()),
+        );
     }
 }
 
@@ -1214,10 +1768,10 @@ pub fn run() {
         .manage(RuntimeState::default())
         .manage(ModelState::default())
         .setup(|app| {
-            let _ = data_dir().map_err(|e| std::io::Error::other(e))?;
-            let _ = database().map_err(|e| std::io::Error::other(e))?;
+            let _ = data_dir().map_err(std::io::Error::other)?;
+            let _ = database().map_err(std::io::Error::other)?;
             let _ = persist_config_file(&load_model_config());
-            build_tray(&app.handle())?;
+            build_tray(app.handle())?;
 
             if let Some(main) = app.get_webview_window("main") {
                 let main_for_close = main.clone();
@@ -1231,9 +1785,9 @@ pub fn run() {
 
             // Ensure the floating webview is created at startup (hidden),
             // so show/hide later only toggles visibility.
-            if let Ok(window) = ensure_floating_window(&app.handle()) {
+            if let Ok(window) = ensure_floating_window(app.handle()) {
                 let _ = position_floating_window(
-                    &app.handle(),
+                    app.handle(),
                     &window,
                     FLOATING_WIDTH,
                     FLOATING_HEIGHT,
@@ -1243,6 +1797,9 @@ pub fn run() {
 
             let handle = app.handle().clone();
             std::thread::spawn(move || supervise_model(handle));
+
+            let handle = app.handle().clone();
+            std::thread::spawn(move || poll_server_metrics(handle));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

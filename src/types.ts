@@ -1,5 +1,19 @@
 export type Phase = "idle" | "recognizing" | "stopped" | "error";
 
+export interface OpsMetrics {
+  captureMs: number | null;
+  encodeMs: number | null;
+  firstTokenMs: number | null;
+  generateMs: number | null;
+  totalMs: number | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  readability: string | null;
+  inputKind: string | null;
+  server: string | null;
+  error: string | null;
+}
+
 export interface RuntimeSnapshot {
   protocolVersion: string;
   mode: string;
@@ -11,6 +25,10 @@ export interface RuntimeSnapshot {
   taskId: string | null;
   goal: string | null;
   message: string;
+  rounds: number;
+  skippedRounds: number;
+  requests: number;
+  metrics: OpsMetrics | null;
 }
 
 export interface ModelConfig {

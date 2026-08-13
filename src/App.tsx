@@ -17,6 +17,10 @@ const initialRuntime: RuntimeSnapshot = {
   taskId: null,
   goal: null,
   message: "Baodou 已在桌面旁陪伴，随时准备观察。",
+  rounds: 0,
+  skippedRounds: 0,
+  requests: 0,
+  metrics: null,
 };
 
 function resolveWindowMode(): "main" | "floating" {
@@ -183,9 +187,25 @@ function FloatingApp() {
   const messageBodyRef = useRef<HTMLParagraphElement>(null);
   const currentWindow = getCurrentWindow();
 
+  // Debounced native resize: streamed updates arrive in bursts, and letting
+  // each one trigger a WebView reflow + native window resize adds jank.  Only
+  // the latest size is applied, at most every 180ms, with a flush on exit.
+  const resizeTimerRef = useRef<number | null>(null);
+  const pendingSizeRef = useRef<{ width: number; height: number } | null>(null);
+
+  const applyPendingResize = () => {
+    resizeTimerRef.current = null;
+    if (pendingSizeRef.current) {
+      void bridge
+        .resizeFloating(pendingSizeRef.current.width, pendingSizeRef.current.height)
+        .catch(() => undefined);
+      pendingSizeRef.current = null;
+    }
+  };
+
   useLayoutEffect(() => {
-    // Let the new message paint first, then keep the newest recognition text
-    // visible and fit the native transparent window around the speech bubble.
+    // Let the new message paint first, then measure the speech bubble and
+    // fit the native transparent window around it (debounced).
     const frame = window.requestAnimationFrame(() => {
       const messageBody = messageBodyRef.current;
       if (messageBody) {
@@ -200,11 +220,24 @@ function FloatingApp() {
         const petSafeLane = 112;
         const width = Math.ceil(speech.getBoundingClientRect().width + petSafeLane + 8);
         const height = Math.ceil(Math.max(speech.getBoundingClientRect().height, 96) + 24);
-        void bridge.resizeFloating(width, height).catch(() => undefined);
+        pendingSizeRef.current = { width, height };
+        if (resizeTimerRef.current == null) {
+          resizeTimerRef.current = window.setTimeout(applyPendingResize, 180);
+        }
       }
     });
     return () => window.cancelAnimationFrame(frame);
   }, [message.text]);
+
+  useEffect(
+    () => () => {
+      if (resizeTimerRef.current != null) {
+        window.clearTimeout(resizeTimerRef.current);
+        applyPendingResize();
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     document.documentElement.classList.add("floating-mode");

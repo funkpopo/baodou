@@ -588,9 +588,10 @@ html.floating-mode #root {
   z-index: 4;
   width: auto;
   min-width: 128px;
-  max-width: min(244px, calc(100% - 120px));
-  /* The shell height follows this bubble; only long message text scrolls. */
-  max-height: 252px;
+  max-width: min(324px, calc(100% - 120px));
+  /* Prefer growing the transparent shell so a complete result is visible;
+     scrolling is only a fallback for unusually long model output. */
+  max-height: 396px;
   padding: 8px 10px 9px;
   border: 1.5px solid #e4fb78;
   border-radius: 14px 14px 14px 6px;
@@ -646,7 +647,7 @@ html.floating-mode #root {
 .floating-speech p {
   margin: 0;
   max-width: 100%;
-  max-height: 188px;
+  max-height: 332px;
   overflow-x: hidden;
   overflow-y: auto;
   color: #1c2812;
