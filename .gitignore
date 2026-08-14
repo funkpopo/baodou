@@ -14,7 +14,10 @@ model/
 model/.gitattributes
 logs/
 artifacts/
-benchmarks/
+benchmarks/results/
+benchmarks/phase_a/artifacts/
+!benchmarks/cases/artifacts/
+!benchmarks/cases/artifacts/*.png
 
 # Local settings and secrets
 .env

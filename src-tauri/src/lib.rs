@@ -2,17 +2,19 @@ mod capture;
 mod sampling;
 mod textsim;
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use capture::ScreenFrame;
+use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use reqwest::blocking::Client;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     env, fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Cursor},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use tauri::{
@@ -40,10 +42,13 @@ const FLOATING_MAX_HEIGHT: f64 = 240.0;
 const FLUSH_FIRST_CHARS: usize = 26;
 const FLUSH_THROTTLE: Duration = Duration::from_millis(150);
 const FLUSH_FORCE_TIMEOUT: Duration = Duration::from_millis(1600);
-/// Leave enough room for a complete visual summary.  Some local vision models
-/// emit additional visible context despite the concise prompt, and a 160-token
-/// ceiling can cut a Chinese sentence off mid-way.
+/// Leave enough room for a complete visual summary. Some local vision models
+/// emit additional visible context despite the concise prompt, so production,
+/// benchmark and documentation intentionally share this 512-token ceiling.
 const MAX_RECOGNITION_TOKENS: u32 = 512;
+const MODEL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MODEL_WARMUP_TIMEOUT: Duration = Duration::from_secs(45);
 
 // --- P1: sampling & refresh policies (in addition to `sampling` module) ---
 /// Above this share of the screen a changed bbox is treated as a broad change
@@ -65,6 +70,8 @@ struct RuntimeState {
 }
 struct ModelState {
     process: Mutex<Option<Child>>,
+    warmed_endpoint: Mutex<Option<String>>,
+    warmup_lock: Mutex<()>,
 }
 impl Default for RuntimeState {
     fn default() -> Self {
@@ -77,6 +84,8 @@ impl Default for ModelState {
     fn default() -> Self {
         Self {
             process: Mutex::new(None),
+            warmed_endpoint: Mutex::new(None),
+            warmup_lock: Mutex::new(()),
         }
     }
 }
@@ -179,8 +188,12 @@ struct RuntimeSnapshot {
 struct OpsMetrics {
     capture_ms: Option<f64>,
     encode_ms: Option<f64>,
-    /// Request connect + send + prefill + first token.
+    /// Request connect + send + prefill + first non-empty content delta.
     first_token_ms: Option<f64>,
+    /// Explicit name for the real first non-empty content delta metric.
+    first_content_token_ms: Option<f64>,
+    /// llama.cpp/OpenAI-compatible completion termination reason.
+    finish_reason: Option<String>,
     /// Remaining generation (first token … stream end).
     generate_ms: Option<f64>,
     total_ms: Option<f64>,
@@ -247,6 +260,8 @@ struct FloatingMessage {
 struct RecognizeResult {
     text: String,
     first_token_ms: Option<f64>,
+    first_content_token_ms: Option<f64>,
+    finish_reason: Option<String>,
     generate_ms: Option<f64>,
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
@@ -347,6 +362,14 @@ fn stream_delta_text(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn stream_finish_reason(value: &serde_json::Value) -> Option<String> {
+    value
+        .pointer("/choices/0/finish_reason")
+        .and_then(|reason| reason.as_str())
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod stream_tests {
     use super::*;
@@ -391,7 +414,7 @@ mod stream_tests {
 
 #[cfg(test)]
 mod response_tests {
-    use super::{response_text, stream_delta_text, strip_thinking};
+    use super::{response_text, stream_delta_text, stream_finish_reason, strip_thinking};
     use serde_json::json;
 
     #[test]
@@ -435,6 +458,12 @@ mod response_tests {
     fn reads_streaming_delta_content() {
         let chunk = json!({ "choices": [{ "delta": { "content": "正在生成" } }] });
         assert_eq!(stream_delta_text(&chunk).as_deref(), Some("正在生成"));
+    }
+
+    #[test]
+    fn reads_streaming_finish_reason() {
+        let chunk = json!({ "choices": [{ "delta": {}, "finish_reason": "length" }] });
+        assert_eq!(stream_finish_reason(&chunk).as_deref(), Some("length"));
     }
 
     #[test]
@@ -694,6 +723,10 @@ fn set_model_config(app: AppHandle, config: ModelConfig) -> Result<ModelConfig, 
 }
 
 fn stop_model(app: &AppHandle) {
+    *app.state::<ModelState>()
+        .warmed_endpoint
+        .lock()
+        .expect("model warmup poisoned") = None;
     if let Some(mut child) = app
         .state::<ModelState>()
         .process
@@ -706,6 +739,7 @@ fn stop_model(app: &AppHandle) {
     }
 }
 
+#[cfg(test)]
 fn is_loopback_endpoint(endpoint: &str) -> bool {
     let host_port = endpoint
         .split("://")
@@ -723,12 +757,16 @@ fn is_loopback_endpoint(endpoint: &str) -> bool {
 /// Loopback llama-server traffic must never inherit HTTP(S)_PROXY. A system
 /// proxy on 127.0.0.1 (common with clash/v2ray) returns 502 for
 /// `http://127.0.0.1:8765/health` and leaves the UI stuck on 模型未就绪.
-fn local_http_client(endpoint: &str, timeout: Duration) -> Result<Client, reqwest::Error> {
-    let mut builder = Client::builder().timeout(timeout);
-    if is_loopback_endpoint(endpoint) {
-        builder = builder.no_proxy();
-    }
-    builder.build()
+fn model_http_client() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        Client::builder()
+            .no_proxy()
+            .connect_timeout(MODEL_CONNECT_TIMEOUT)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .build()
+            .expect("build shared llama HTTP client")
+    })
 }
 
 fn llama_health_url(endpoint: &str) -> Option<String> {
@@ -743,9 +781,11 @@ fn llama_health(endpoint: &str) -> bool {
     let Some(url) = llama_health_url(endpoint) else {
         return false;
     };
-    local_http_client(endpoint, Duration::from_secs(2))
+    model_http_client()
+        .get(url)
+        .timeout(Duration::from_secs(2))
+        .send()
         .ok()
-        .and_then(|client| client.get(url).send().ok())
         .map(|response| response.status().is_success())
         .unwrap_or(false)
 }
@@ -780,11 +820,84 @@ fn model_process_alive(app: &AppHandle) -> bool {
     }
 }
 
+fn warmup_image_url() -> Result<String, String> {
+    let image = RgbImage::from_pixel(64, 64, Rgb([36, 42, 52]));
+    let mut jpeg = Cursor::new(Vec::new());
+    DynamicImage::ImageRgb8(image)
+        .write_to(&mut jpeg, ImageFormat::Jpeg)
+        .map_err(|error| format!("无法构建视觉预热图片：{error}"))?;
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        BASE64.encode(jpeg.into_inner())
+    ))
+}
+
+fn warmup_model(endpoint: &str) -> Result<(), String> {
+    let payload = json!({
+        "model": "local-vision",
+        "temperature": 0,
+        "max_tokens": 1,
+        "cache_prompt": false,
+        "stream": false,
+        "reasoning_format": "none",
+        "chat_template_kwargs": { "enable_thinking": false },
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "/no_think\n仅回答：好" },
+                { "type": "image_url", "image_url": { "url": warmup_image_url()? } }
+            ]
+        }]
+    });
+    model_http_client()
+        .post(endpoint)
+        .timeout(MODEL_WARMUP_TIMEOUT)
+        .json(&payload)
+        .send()
+        .map_err(|error| format!("视觉模型预热请求失败：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("视觉模型预热失败：{error}"))?
+        .text()
+        .map_err(|error| format!("视觉模型预热响应读取失败：{error}"))?;
+    Ok(())
+}
+
+fn prepare_model(app: &AppHandle, endpoint: &str, ready_message: &str) -> bool {
+    let state = app.state::<ModelState>();
+    let _warmup_guard = state.warmup_lock.lock().expect("model warmup poisoned");
+    if state
+        .warmed_endpoint
+        .lock()
+        .expect("model warmup poisoned")
+        .as_deref()
+        == Some(endpoint)
+    {
+        mark_model_ready(app, ready_message);
+        return true;
+    }
+
+    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+        snapshot.model_ready = false;
+        snapshot.message = "本地视觉模型已启动，正在预热视觉路径…".into();
+    });
+    match warmup_model(endpoint) {
+        Ok(()) => {
+            *state.warmed_endpoint.lock().expect("model warmup poisoned") =
+                Some(endpoint.to_owned());
+            mark_model_ready(app, ready_message);
+            true
+        }
+        Err(error) => {
+            mark_model_not_ready(app, error);
+            false
+        }
+    }
+}
+
 fn wait_for_model(app: &AppHandle, endpoint: &str, attempts: u32) -> bool {
     for _ in 0..attempts {
         if llama_health(endpoint) {
-            mark_model_ready(app, "本地视觉模型已就绪");
-            return true;
+            return prepare_model(app, endpoint, "本地视觉模型已就绪");
         }
         std::thread::sleep(Duration::from_millis(400));
     }
@@ -794,7 +907,7 @@ fn wait_for_model(app: &AppHandle, endpoint: &str, attempts: u32) -> bool {
 fn start_model(app: AppHandle) {
     let config = load_model_config();
     if llama_health(&config.llama_url) {
-        mark_model_ready(&app, "本地视觉模型已连接");
+        prepare_model(&app, &config.llama_url, "本地视觉模型已连接");
         return;
     }
 
@@ -903,12 +1016,15 @@ fn supervise_model(app: AppHandle) {
         std::thread::sleep(Duration::from_secs(2));
         let config = load_model_config();
         if llama_health(&config.llama_url) {
-            update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
-                if !snapshot.model_ready {
-                    snapshot.model_ready = true;
-                    snapshot.message = "本地视觉模型已就绪".into();
-                }
-            });
+            let ready = app
+                .state::<RuntimeState>()
+                .snapshot
+                .lock()
+                .expect("runtime poisoned")
+                .model_ready;
+            if !ready {
+                prepare_model(&app, &config.llama_url, "本地视觉模型已就绪");
+            }
             continue;
         }
 
@@ -932,9 +1048,9 @@ fn server_metrics(endpoint: &str) -> Option<String> {
         return None;
     }
     let url = format!("{base}/metrics");
-    let text = local_http_client(endpoint, Duration::from_secs(3))
-        .ok()?
+    let text = model_http_client()
         .get(&url)
+        .timeout(Duration::from_secs(3))
         .send()
         .ok()?
         .error_for_status()
@@ -1113,9 +1229,9 @@ fn recognize(
     });
 
     let send_started = Instant::now();
-    let response = local_http_client(endpoint, Duration::from_secs(12))
-        .map_err(|e| e.to_string())?
+    let response = model_http_client()
         .post(endpoint)
+        .timeout(MODEL_REQUEST_TIMEOUT)
         .json(&payload)
         .send()
         .map_err(|e| format!("识别请求失败：{e}"))?
@@ -1124,7 +1240,8 @@ fn recognize(
 
     let mut flusher = StreamFlusher::new();
     let mut raw_text = String::new();
-    let mut first_byte: Option<Instant> = None;
+    let mut first_content: Option<Instant> = None;
+    let mut finish_reason = None;
     let mut prompt_tokens = None;
     let mut completion_tokens = None;
     for line in BufReader::new(response).lines() {
@@ -1136,13 +1253,16 @@ fn recognize(
         if data == "[DONE]" {
             break;
         }
-        if first_byte.is_none() {
-            first_byte = Some(Instant::now());
-        }
         let chunk: serde_json::Value =
             serde_json::from_str(data).map_err(|e| format!("模型流式响应解析失败：{e}"))?;
         if let Some(delta) = stream_delta_text(&chunk) {
+            if first_content.is_none() {
+                first_content = Some(Instant::now());
+            }
             raw_text.push_str(&delta);
+        }
+        if let Some(reason) = stream_finish_reason(&chunk) {
+            finish_reason = Some(reason);
         }
         if let Some(value) = chunk
             .pointer("/usage/prompt_tokens")
@@ -1170,15 +1290,20 @@ fn recognize(
     }
 
     let done = Instant::now();
-    let first_token_ms = first_byte.map(|t| t.duration_since(send_started).as_secs_f64() * 1000.0);
-    let generate_ms = first_byte
+    let first_content_token_ms =
+        first_content.map(|t| t.duration_since(send_started).as_secs_f64() * 1000.0);
+    let generate_ms = first_content
         .map(|t| done.duration_since(t).as_secs_f64() * 1000.0)
         .or_else(|| Some(done.duration_since(send_started).as_secs_f64() * 1000.0));
 
     (!final_text.is_empty())
         .then_some(RecognizeResult {
             text: final_text,
-            first_token_ms,
+            // Keep the established field accurate for existing consumers and
+            // expose the explicit name alongside it in RuntimeSnapshot.
+            first_token_ms: first_content_token_ms,
+            first_content_token_ms,
+            finish_reason,
             generate_ms,
             prompt_tokens,
             completion_tokens,
@@ -1271,8 +1396,7 @@ fn run_task(
     std::thread::spawn(move || {
         // Seed the desktop backdrop while the floating window is still hidden
         // so the recognition loop never has to cloak / hide the pet.
-        let backdrop =
-            capture::DesktopBackdrop::capture_excluding(&app_capture_hwnds(&clone)).ok();
+        let backdrop = capture::DesktopBackdrop::capture_excluding(&app_capture_hwnds(&clone)).ok();
         if let Err(error) = show_floating_window(clone.clone()) {
             update_snapshot(&clone.state::<RuntimeState>(), |snapshot| {
                 snapshot.message = error.clone();
@@ -1392,7 +1516,8 @@ fn recognition_loop(
         let frame_started = Instant::now();
 
         let capture_started = Instant::now();
-        let captured = match capture_primary_excluding(&app_capture_hwnds(&app), backdrop.as_mut()) {
+        let captured = match capture_primary_excluding(&app_capture_hwnds(&app), backdrop.as_mut())
+        {
             Ok(frame) => frame,
             Err(error) => {
                 update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
@@ -1591,6 +1716,8 @@ fn recognition_loop(
                         capture_ms: Some(capture_ms),
                         encode_ms: Some(encode_ms),
                         first_token_ms: result.first_token_ms,
+                        first_content_token_ms: result.first_content_token_ms,
+                        finish_reason: result.finish_reason,
                         generate_ms: result.generate_ms,
                         total_ms: Some(total_ms),
                         prompt_tokens: result.prompt_tokens,
@@ -1620,6 +1747,8 @@ fn recognition_loop(
                         capture_ms: Some(capture_ms),
                         encode_ms: Some(encode_ms),
                         first_token_ms: None,
+                        first_content_token_ms: None,
+                        finish_reason: None,
                         generate_ms: None,
                         total_ms: Some(total_ms),
                         prompt_tokens: None,
@@ -1769,7 +1898,9 @@ fn resize_floating_window(app: AppHandle, width: f64, height: f64) -> Result<(),
         return Ok(());
     };
     let width = width.round().clamp(FLOATING_MIN_WIDTH, FLOATING_MAX_WIDTH);
-    let height = height.round().clamp(FLOATING_MIN_HEIGHT, FLOATING_MAX_HEIGHT);
+    let height = height
+        .round()
+        .clamp(FLOATING_MIN_HEIGHT, FLOATING_MAX_HEIGHT);
     let scale = window.scale_factor().unwrap_or(1.0);
     let current_size = window.inner_size().map_err(|e| e.to_string())?;
     let current_pos = window.outer_position().map_err(|e| e.to_string())?;

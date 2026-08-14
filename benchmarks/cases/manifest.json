@@ -1,0 +1,104 @@
+{
+  "version": "1",
+  "llamaEndpoint": "{{LLAMA_URL}}",
+  "notes": "完全合成的脱敏 UI 基准集，不含真实账号、邮件、文件或桌面数据；screenshotPath 相对本文件。可通过 scripts/generate_benchmark_fixtures.ps1 确定性重建。",
+  "cases": [
+    {
+      "id": "chat-email-inbox",
+      "category": "聊天/邮件",
+      "screenshotPath": "artifacts/chat-email-inbox.png",
+      "goal": "描述当前屏幕上的关键可见内容",
+      "expectedKeyFacts": ["收件箱", "测试构建已完成"],
+      "forbidden": ["点击", "输入", "打开", "关闭", "ACTION", "坐标"],
+      "maxAcceptedLatencyMs": 9000,
+      "repeat": 3
+    },
+    {
+      "id": "browser-home",
+      "category": "浏览器",
+      "screenshotPath": "artifacts/browser-home.png",
+      "goal": "描述当前屏幕上的关键可见内容",
+      "expectedKeyFacts": ["示例知识库", "服务正常"],
+      "forbidden": ["ACTION", "坐标"],
+      "maxAcceptedLatencyMs": 9000,
+      "repeat": 3
+    },
+    {
+      "id": "ide-terminal-error",
+      "category": "IDE/终端",
+      "screenshotPath": "artifacts/ide-terminal-error.png",
+      "goal": "描述当前屏幕上的关键可见内容",
+      "expectedKeyFacts": ["E0425", "fixture_id", "FAILED"],
+      "allowedUncertainty": ["报错文字太小时说明看不清而非猜测"],
+      "forbidden": ["虚构", "修复步骤", "ACTION", "坐标"],
+      "maxAcceptedLatencyMs": 9000,
+      "repeat": 3
+    },
+    {
+      "id": "spreadsheet-numbers",
+      "category": "表格",
+      "screenshotPath": "artifacts/spreadsheet-numbers.png",
+      "goal": "描述当前屏幕上的关键可见内容",
+      "expectedKeyFacts": ["Gamma", "633"],
+      "allowedUncertainty": ["无法确认的数字应说明看不清楚"],
+      "forbidden": ["ACTION", "坐标"],
+      "maxAcceptedLatencyMs": 9000,
+      "repeat": 3
+    },
+    {
+      "id": "popup-error-dialog",
+      "category": "弹窗与错误",
+      "screenshotPath": "artifacts/popup-error-dialog.png",
+      "goal": "描述当前屏幕上的关键可见内容",
+      "expectedKeyFacts": ["连接失败", "NET-1042", "确定"],
+      "allowedUncertainty": ["看不清时说明看不清"],
+      "forbidden": ["ACTION", "坐标", "点击"],
+      "maxAcceptedLatencyMs": 9000,
+      "repeat": 3
+    },
+    {
+      "id": "multi-window-desktop",
+      "category": "多窗口",
+      "screenshotPath": "artifacts/multi-window-desktop.png",
+      "goal": "描述当前屏幕上的关键可见内容",
+      "expectedKeyFacts": ["下载管理器", "下载完成", "100%"],
+      "allowedUncertainty": ["被遮挡窗口信息无法确认时不要补全"],
+      "forbidden": ["ACTION", "坐标"],
+      "maxAcceptedLatencyMs": 9000,
+      "repeat": 3
+    },
+    {
+      "id": "small-chinese-text",
+      "category": "中文小字",
+      "screenshotPath": "artifacts/small-chinese-text.png",
+      "goal": "描述当前屏幕上的关键可见内容",
+      "expectedKeyFacts": ["通知设置", "专注模式", "五秒"],
+      "allowedUncertainty": ["小字无法辨认时如实说明"],
+      "forbidden": ["虚构", "ACTION", "坐标"],
+      "maxAcceptedLatencyMs": 9000,
+      "repeat": 3
+    },
+    {
+      "id": "dark-theme-ui",
+      "category": "暗色主题",
+      "screenshotPath": "artifacts/dark-theme-ui.png",
+      "goal": "描述当前屏幕上的关键可见内容",
+      "expectedKeyFacts": ["API 网关", "正常", "积压 12"],
+      "allowedUncertainty": ["对比度过低看不清时说明看不清"],
+      "forbidden": ["ACTION", "坐标"],
+      "maxAcceptedLatencyMs": 9000,
+      "repeat": 3
+    },
+    {
+      "id": "scrolling-video-or-scroll",
+      "category": "滚动或视频",
+      "screenshotPath": "artifacts/scrolling.png",
+      "goal": "描述当前屏幕上的关键可见内容",
+      "expectedKeyFacts": ["离线模型性能测试", "首 token 延迟", "08:24"],
+      "allowedUncertainty": ["单张截图无法判断变化"],
+      "forbidden": ["ACTION", "坐标", "变化过程断言"],
+      "maxAcceptedLatencyMs": 9000,
+      "repeat": 3
+    }
+  ]
+}

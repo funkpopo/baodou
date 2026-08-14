@@ -38,15 +38,15 @@ React 悬浮精灵窗 ◀── floating-message ──────────�
    更高的有效像素密度，用于小字、终端、表格和聊天内容的识别；整屏变化仍发送整屏缩略图；
    多图模式（缩略图 + 裁剪同一请求）默认关闭，确认模型能力稳定后再打开；
 5. 发送拟人视觉助手提示（第一人称陪看屏幕、首句给最重要且明确的可见内容、第二句补
-   1–2 项相关细节、禁止虚构 / 禁止操作建议）与图片，`max_tokens=160`，低温度 `0.1`，
+   1–2 项相关细节、禁止虚构 / 禁止操作建议）与图片，`max_tokens=512`，低温度 `0.1`，
    `cache_prompt=true`；
 6. 流式结果在 Rust 侧节流：首个完整句 / 换行 / 约 26 字或 150ms 间隔才推送一次悬浮窗，
    长时间无完整句时推送带省略号的临时文本，最终结果无条件再发一次纠偏；
 7. 结果先做语义去重（归一化 + 字符包含度 + 关键数字 / 错误码 / 状态变更检测），再按
    置信度分级（清晰可读 / 局部可读 / 不宜判断）决定是否刷新悬浮窗；相邻结果状态词互相
    矛盾时改为保守表述；
-8. 每轮记录截图编码、prefill/首 token、生成与总耗时，并轮询 llama-server `/metrics`
-   的 prompt eval / cache hit / KV 使用，供 `benchmarks/` 前后对比。
+8. 每轮记录截图编码、首个非空 content token、`finish_reason`、生成与总耗时，并轮询
+   llama-server `/metrics` 的 prompt eval / cache hit / KV 使用，供 `benchmarks/` 前后对比。
 
 该循环没有鼠标、键盘、前台窗口切换、应用启动、坐标解析或执行计划等能力。停止任务仅修改运行时状态，后续帧在开始前会检查该状态。
 
@@ -82,7 +82,7 @@ Rust 在启动识别时创建标签为 `floating` 的独立 Webview 窗口。它
 本地视觉模型通过 OpenAI 兼容的 `POST /v1/chat/completions` 接口调用。模型人格为坐在桌边的
 拟人视觉助手：用第一人称短句帮用户观察电脑界面，而不是写检测报告。输出仍收敛为“首句点出最
 重要且明确的可见内容、第二句补充 1–2 项直接相关细节”，并强制：单张截图不得声称时间上的
-“变化”、模糊内容如实说明而非补全、不产生操作建议、步骤、坐标或动作协议。`max_tokens=160`
+“变化”、模糊内容如实说明而非补全、不产生操作建议、步骤、坐标或动作协议。`max_tokens=512`
 与两句摘要匹配（属输出上限，不改动 `-c` 上下文长度）。默认配置写入便携目录下的 `data/config.json`；
 `nGpuLayers` / `batchSize` / `ubatchSize` / `flashAttn` 等调参项只影响 offload、batch、线程与
 Flash Attention，不触碰 `-c`。
@@ -91,5 +91,7 @@ Flash Attention，不触碰 `-c`。
 
 主窗口轮询的 `RuntimeSnapshot` 携带 `rounds` / `skippedRounds` / `requests`（跳帧率）与
 `metrics`（截图、编码、prefill/首 token、生成、总耗时、token、输入类型与置信度分级）；
-服务端 `/metrics` 汇总（prompt eval、cache hit、KV 使用）亦写入其中。`benchmarks/` 提供
+服务端 `/metrics` 汇总（prompt eval、cache hit、KV 使用）亦写入其中。推理 HTTP Client
+全局复用连接池，连接超时为 2 秒、单轮请求总超时为 30 秒；服务通过 `/health` 后先执行一次
+固定合成图的视觉 warmup，完成后才标记 ready。`benchmarks/` 提供
 脱敏基准集清单与模型侧评测脚本，用于修改前后对比与准入验收。

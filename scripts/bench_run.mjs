@@ -70,19 +70,20 @@ function toBase64(buffer) {
 
 async function runOnce(caseData, imageBase64) {
   const started = Date.now();
-  let firstTokenMs = -1;
+  let firstContentTokenMs = -1;
   let firstReadableMs = -1;
   let finalMs = -1;
   let text = "";
   let promptTokens = null;
   let completionTokens = null;
+  let finishReason = null;
   let httpStatus = null;
   let error = null;
 
   const payload = {
     model: caseData.model ?? "local-vision",
     temperature: 0.1,
-    max_tokens: 160,
+    max_tokens: 512,
     cache_prompt: true,
     stream: true,
     reasoning_format: "none",
@@ -103,6 +104,7 @@ async function runOnce(caseData, imageBase64) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30_000),
     });
     httpStatus = response.status;
     if (!response.ok || !response.body) {
@@ -136,12 +138,14 @@ async function runOnce(caseData, imageBase64) {
             chunk?.choices?.[0]?.delta?.text ??
             "";
           if (delta) {
-            if (firstTokenMs === -1) firstTokenMs = Date.now() - started;
+            if (firstContentTokenMs === -1) firstContentTokenMs = Date.now() - started;
             text += delta;
             if (firstReadableMs === -1 && hasReadableBoundary(text)) {
               firstReadableMs = Date.now() - started;
             }
           }
+          const reason = chunk?.choices?.[0]?.finish_reason;
+          if (typeof reason === "string" && reason) finishReason = reason;
           if (chunk?.usage) {
             promptTokens = chunk.usage.prompt_tokens ?? promptTokens;
             completionTokens = chunk.usage.completion_tokens ?? completionTokens;
@@ -156,12 +160,14 @@ async function runOnce(caseData, imageBase64) {
 
   return {
     text: text.trim(),
-    firstTokenMs,
+    firstTokenMs: firstContentTokenMs,
+    firstContentTokenMs,
     firstReadableMs,
     finalMs,
     totalMs: finalMs === -1 ? Date.now() - started : finalMs,
     promptTokens,
     completionTokens,
+    finishReason,
     httpStatus,
     error,
   };
@@ -215,11 +221,13 @@ for (const caseData of cases) {
     screenshot: caseData.screenshotPath,
     ok: failed === 0,
     firstTokenMs: firstReasonable.firstTokenMs,
+    firstContentTokenMs: firstReasonable.firstContentTokenMs,
     firstReadableMs: firstReasonable.firstReadableMs,
     finalMs: firstReasonable.finalMs,
     totalMs: firstReasonable.totalMs,
     promptTokens: firstReasonable.promptTokens,
     completionTokens: firstReasonable.completionTokens,
+    finishReason: firstReasonable.finishReason,
     factsHit: evalResult.factsHit,
     factsTotal: evalResult.factsTotal,
     forbiddenHits: evalResult.forbiddenHits,
@@ -249,8 +257,8 @@ function csvEscape(value) {
   return typeof value === "string" ? `"${value.replace(/"/g, '""')}"` : String(value);
 }
 const header = [
-  "id", "category", "ok", "firstTokenMs", "firstReadableMs", "finalMs", "totalMs",
-  "promptTokens", "completionTokens", "factsHit", "factsTotal", "forbiddenHits",
+  "id", "category", "ok", "firstTokenMs", "firstContentTokenMs", "firstReadableMs", "finalMs", "totalMs",
+  "promptTokens", "completionTokens", "finishReason", "factsHit", "factsTotal", "forbiddenHits",
   "lowInfo", "jitter", "repeats", "failedRequests", "error",
 ];
 const rows = [header.join(",")];

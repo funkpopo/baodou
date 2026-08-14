@@ -4,6 +4,8 @@ export interface OpsMetrics {
   captureMs: number | null;
   encodeMs: number | null;
   firstTokenMs: number | null;
+  firstContentTokenMs: number | null;
+  finishReason: string | null;
   generateMs: number | null;
   totalMs: number | null;
   promptTokens: number | null;

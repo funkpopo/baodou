@@ -244,7 +244,7 @@ function FloatingApp() {
   const messageBodyRef = useRef<HTMLParagraphElement>(null);
   const shellRef = useRef<HTMLElement>(null);
   const lastSizeRef = useRef({ width: 0, height: 0 });
-  const scheduleSizeRef = useRef<() => void>(() => undefined);
+  const scheduleSizeRef = useRef<(force?: boolean) => void>(() => undefined);
   const currentWindow = getCurrentWindow();
 
   useEffect(() => {
