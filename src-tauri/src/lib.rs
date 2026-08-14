@@ -1394,9 +1394,29 @@ fn run_task(
     });
     let clone = app.clone();
     std::thread::spawn(move || {
+        // Own the visibility sequence in the host: both app windows must be
+        // hidden before the clean backdrop is seeded. The frontend also hides
+        // itself after the command returns, but correctness does not depend on
+        // that asynchronous UI call winning this race.
+        if let Some(main) = clone.get_webview_window("main") {
+            let _ = main.hide();
+        }
+        let capture_hwnds = match app_capture_hwnds(&clone) {
+            Ok(hwnds) => hwnds,
+            Err(error) => {
+                update_snapshot(&clone.state::<RuntimeState>(), |snapshot| {
+                    snapshot.phase = "error".into();
+                    snapshot.message = error.clone();
+                });
+                emit_floating(&clone, error, "error");
+                return;
+            }
+        };
         // Seed the desktop backdrop while the floating window is still hidden
         // so the recognition loop never has to cloak / hide the pet.
-        let backdrop = capture::DesktopBackdrop::capture_excluding(&app_capture_hwnds(&clone)).ok();
+        // If this one-time optimisation fails, the capture path performs a
+        // fail-closed, per-frame exclusion instead of sending a raw frame.
+        let backdrop = capture::DesktopBackdrop::capture_excluding(&capture_hwnds).ok();
         if let Err(error) = show_floating_window(clone.clone()) {
             update_snapshot(&clone.state::<RuntimeState>(), |snapshot| {
                 snapshot.message = error.clone();
@@ -1404,7 +1424,7 @@ fn run_task(
             emit_floating(&clone, format!("无法显示悬浮窗：{error}"), "error");
             return;
         }
-        recognition_loop(clone, id, goal, backdrop);
+        recognition_loop(clone, id, goal, capture_hwnds, backdrop);
     });
     Ok("started".into())
 }
@@ -1494,6 +1514,7 @@ fn recognition_loop(
     app: AppHandle,
     task_id: String,
     goal: String,
+    capture_hwnds: Vec<isize>,
     mut backdrop: Option<capture::DesktopBackdrop>,
 ) {
     use capture::{area_fraction, capture_primary_excluding, change_bbox};
@@ -1516,8 +1537,7 @@ fn recognition_loop(
         let frame_started = Instant::now();
 
         let capture_started = Instant::now();
-        let captured = match capture_primary_excluding(&app_capture_hwnds(&app), backdrop.as_mut())
-        {
+        let captured = match capture_primary_excluding(&capture_hwnds, backdrop.as_mut()) {
             Ok(frame) => frame,
             Err(error) => {
                 update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
@@ -1785,12 +1805,14 @@ fn pause_runtime(app: AppHandle, state: State<'_, RuntimeState>) -> RuntimeSnaps
     stop_runtime(app, state)
 }
 
-fn app_capture_hwnds(app: &AppHandle) -> Vec<isize> {
+fn app_capture_hwnds(app: &AppHandle) -> Result<Vec<isize>, String> {
     ["main", FLOATING_LABEL]
         .into_iter()
-        .filter_map(|label| {
-            let window = app.get_webview_window(label)?;
-            window_hwnd(&window)
+        .map(|label| {
+            let window = app
+                .get_webview_window(label)
+                .ok_or_else(|| format!("无法获取 {label} 应用窗口，已停止屏幕识别"))?;
+            window_hwnd(&window).ok_or_else(|| format!("无法获取 {label} 窗口句柄，已停止屏幕识别"))
         })
         .collect()
 }

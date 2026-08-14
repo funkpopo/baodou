@@ -91,9 +91,11 @@ button:disabled {
 .topbar {
   height: 48px;
   flex: none;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  padding: 0 12px 0 16px;
+  column-gap: 10px;
+  padding: 0 8px 0 12px;
   border-bottom: 1px solid #1e2430;
   background: rgba(10, 12, 17, 0.84);
   backdrop-filter: blur(18px) saturate(1.2);
@@ -107,6 +109,7 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   font-size: 14px;
   font-weight: 800;
   letter-spacing: -0.04em;
@@ -129,12 +132,11 @@ button:disabled {
 }
 
 .topbar-center {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
   color: #b6c0c8;
   font: 500 11px "DM Mono", monospace;
 }
@@ -160,14 +162,22 @@ button:disabled {
 }
 
 .window-tools {
-  margin-left: auto;
   display: flex;
   height: 100%;
 }
 
 .window-button {
   width: 38px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  line-height: 0;
   color: #9aa4af;
+}
+
+.window-button svg {
+  display: block;
 }
 
 .window-button:hover {
@@ -324,29 +334,6 @@ button:disabled {
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.stage-phase {
-  flex: none;
-  padding: 4px 8px;
-  border: 1px solid #2b333d;
-  border-radius: 99px;
-  background: #151a20;
-  color: #7f8995;
-  font: 9px "DM Mono", monospace;
-}
-
-.stage-phase.recognizing {
-  border-color: #3c4c2e;
-  background: #192116;
-  color: var(--accent);
-}
-
-.stage-phase.error,
-.stage-phase.stopped {
-  border-color: #50332f;
-  background: #241817;
-  color: #e5927d;
 }
 
 .computer-use-detail {
@@ -518,38 +505,6 @@ button:disabled {
   border-radius: 0 0 70% 70%;
 }
 
-.bot-caption {
-  position: absolute;
-  z-index: 3;
-  bottom: 18px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  width: min(320px, calc(100% - 28px));
-  text-align: center;
-  pointer-events: none;
-}
-
-.bot-caption strong {
-  color: #e4e9d2;
-  font-size: 12.5px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  text-shadow: 0 2px 8px #0008;
-}
-
-.bot-caption span {
-  max-width: 100%;
-  color: #6e7a76;
-  font: 10px "DM Mono", monospace;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 /* ── Floating spirit window (HWND tracks visible content) ── */
 html.floating-mode,
 html.floating-mode body,
@@ -693,8 +648,11 @@ html.floating-mode #root::-webkit-scrollbar {
 .floating-close {
   width: 18px;
   height: 18px;
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 0;
   border-radius: 6px;
   color: #3a4a28;
   background: #00000014;
@@ -702,9 +660,34 @@ html.floating-mode #root::-webkit-scrollbar {
   -webkit-app-region: no-drag;
 }
 
+.floating-close svg {
+  display: block;
+  flex: none;
+}
+
 .floating-close:hover {
   color: #172014;
   background: #00000022;
+}
+
+@media (max-width: 460px) {
+  .brand small {
+    display: none;
+  }
+}
+
+@media (max-width: 380px) {
+  .topbar {
+    column-gap: 6px;
+  }
+
+  .topbar-center {
+    font-size: 10px;
+  }
+
+  .window-button {
+    width: 34px;
+  }
 }
 
 /* Compact spirit pet — 2D only, stays inside the fixed canvas. */

@@ -102,7 +102,9 @@ function MainApp() {
     }));
     try {
       await bridge.start(DEFAULT_GOAL);
-      await bridge.showFloating();
+      // The Rust host shows the companion only after it has captured a clean
+      // desktop backdrop. Showing it here races that capture and can feed the
+      // companion's own speech bubble back into the vision model.
       await currentWindow.hide();
     } catch (cause) {
       setError(String(cause));
@@ -360,9 +362,11 @@ function FloatingApp() {
     void currentWindow.startDragging();
   }
 
-  async function hide() {
+  async function closeAndStop() {
     try {
-      await bridge.hideFloating();
+      // Closing the companion is also the user's stop action. The runtime
+      // command updates the shared state first and hides this window itself.
+      await bridge.stop();
     } catch {
       void currentWindow.hide();
     }
@@ -380,7 +384,11 @@ function FloatingApp() {
           <div className="floating-speech-meta">
             <span className={`status-pip ${active ? "live" : ""}`} />
             <strong>{floatingStatusLabel(message.phase, active)}</strong>
-            <button className="floating-close" onClick={() => void hide()} aria-label="隐藏悬浮窗">
+            <button
+              className="floating-close"
+              onClick={() => void closeAndStop()}
+              aria-label="关闭悬浮窗并停止识别"
+            >
               <X size={11} />
             </button>
           </div>
@@ -413,12 +421,6 @@ function BotStage({
   detail: string;
 }) {
   const terminal = phase === "stopped" || phase === "error";
-  const caption = active ? "Baodou 正在观察" : terminal ? (phase === "stopped" ? "识别已停止" : "需要处理") : "准备就绪";
-  const sub = active
-    ? "结果会同步到系统级悬浮窗"
-    : terminal
-      ? "可以再次启动继续识别"
-      : "点击启动开始实时屏幕识别";
 
   return (
     <div className={`bot-stage ${active ? "is-active" : ""} ${terminal ? "is-terminal" : ""}`}>
@@ -430,9 +432,6 @@ function BotStage({
             <strong>{status}</strong>
           </div>
         </div>
-        <span className={`stage-phase ${phase}`}>
-          {active ? "运行中" : phase === "stopped" ? "已停止" : phase === "error" ? "异常" : "待命"}
-        </span>
       </div>
       <p className="computer-use-detail">{detail}</p>
       <div className="bot-orbit orbit-one" />
@@ -441,10 +440,6 @@ function BotStage({
         <span className="bot-eye eye-left" />
         <span className="bot-eye eye-right" />
         <span className="bot-mouth" />
-      </div>
-      <div className="bot-caption">
-        <strong>{caption}</strong>
-        <span>{sub}</span>
       </div>
     </div>
   );

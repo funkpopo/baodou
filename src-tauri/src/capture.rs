@@ -83,11 +83,12 @@ impl DesktopBackdrop {
     /// once before showing the floating window so the cloak never flickers
     /// during the recognition loop.
     pub fn capture_excluding(hwnds: &[isize]) -> Result<Self, String> {
+        ensure_exclusion_targets(hwnds)?;
         let monitor = primary_monitor()?;
         let origin_x = monitor.x().unwrap_or(0);
         let origin_y = monitor.y().unwrap_or(0);
         let image = {
-            let _cloak = WindowCloak::apply(hwnds);
+            let _cloak = WindowCloak::apply(hwnds)?;
             monitor
                 .capture_image()
                 .map_err(|e| format!("屏幕采集失败：{e}"))?
@@ -106,17 +107,18 @@ impl DesktopBackdrop {
     /// Paints cached desktop over each visible Baodou window, then stores the
     /// cleaned frame so the next round can refresh pixels that are no longer
     /// covered (window moved / resized / hidden).
-    fn refresh_and_paint(&mut self, frame: &mut RgbaImage, hwnds: &[isize]) {
-        self.paint_over(frame, hwnds);
+    fn refresh_and_paint(&mut self, frame: &mut RgbaImage, hwnds: &[isize]) -> Result<(), String> {
+        self.paint_over(frame, hwnds)?;
         self.image.clone_from(frame);
+        Ok(())
     }
 
     /// Copies the cached desktop into each visible Baodou window rectangle.
-    fn paint_over(&self, frame: &mut RgbaImage, hwnds: &[isize]) {
+    fn paint_over(&self, frame: &mut RgbaImage, hwnds: &[isize]) -> Result<(), String> {
         let frame_w = frame.width() as i32;
         let frame_h = frame.height() as i32;
         for hwnd in hwnds.iter().copied().filter(|hwnd| *hwnd != 0) {
-            let Some(rect) = visible_window_rect(hwnd) else {
+            let Some(rect) = visible_window_rect(hwnd)? else {
                 continue;
             };
             let x0 = (rect.0 - self.origin_x).max(0);
@@ -135,38 +137,41 @@ impl DesktopBackdrop {
                 (y1 - y0) as u32,
             );
         }
+        Ok(())
     }
 }
 
-/// Captures the primary monitor, downsamples in memory and computes both
-/// change-detection grids.  There is intentionally no PNG round-trip here:
-/// the JPEG for the model is encoded directly from the in-memory downsample.
-///
-/// On Windows this uses Graphics Capture (`xcap` `wgc` feature). The live
-/// grab leaves Baodou windows painted; [`capture_primary_excluding`] then
-/// stamps a pre-captured desktop backdrop over those HWNDs so the pet /
-/// bubble / launcher do not appear in the recognition frame. WebView2
-/// cannot stay painted under `WDA_EXCLUDEFROMCAPTURE`, so that flag is
-/// not used, and DWM cloak is only applied while seeding the backdrop.
-pub fn capture_primary() -> Result<CapturedFrame, String> {
-    frame_from_rgba(grab_primary()?)
-}
-
-/// Same as [`capture_primary`], but paints `backdrop` over `hwnds` so those
-/// windows stay on screen for the user while the model sees the desktop
-/// behind them.
+/// Captures the primary monitor and paints `backdrop` over `hwnds` so those
+/// windows stay on screen for the user while the model sees the cached desktop
+/// behind them. If no valid backdrop exists, the windows are DWM-cloaked for
+/// the grab; an unfiltered image is never returned.
 pub fn capture_primary_excluding(
     hwnds: &[isize],
     backdrop: Option<&mut DesktopBackdrop>,
 ) -> Result<CapturedFrame, String> {
-    let Some(backdrop) = backdrop else {
-        return capture_primary();
-    };
+    ensure_exclusion_targets(hwnds)?;
     let mut image = grab_primary()?;
-    if backdrop.covers(image.width(), image.height()) {
-        backdrop.refresh_and_paint(&mut image, hwnds);
+    if let Some(backdrop) = backdrop {
+        if backdrop.covers(image.width(), image.height()) {
+            backdrop.refresh_and_paint(&mut image, hwnds)?;
+            return frame_from_rgba(image);
+        }
     }
+
+    // Never fall back to an unfiltered frame. A missing/stale backdrop is
+    // unusual (startup capture failure or display-mode change), but allowing
+    // the raw screenshot through here exposes Baodou's own response to the
+    // vision model and creates a self-reinforcing feedback loop.
+    let image = grab_primary_excluding(hwnds)?;
     frame_from_rgba(image)
+}
+
+fn ensure_exclusion_targets(hwnds: &[isize]) -> Result<(), String> {
+    if hwnds.iter().any(|hwnd| *hwnd != 0) {
+        Ok(())
+    } else {
+        Err("无法获取应用窗口句柄，已阻止发送未经遮罩的屏幕截图".into())
+    }
 }
 
 fn primary_monitor() -> Result<Monitor, String> {
@@ -181,6 +186,11 @@ fn grab_primary() -> Result<RgbaImage, String> {
     primary_monitor()?
         .capture_image()
         .map_err(|e| format!("屏幕采集失败：{e}"))
+}
+
+fn grab_primary_excluding(hwnds: &[isize]) -> Result<RgbaImage, String> {
+    let _cloak = WindowCloak::apply(hwnds)?;
+    grab_primary()
 }
 
 fn frame_from_rgba(image: RgbaImage) -> Result<CapturedFrame, String> {
@@ -226,22 +236,31 @@ struct WindowCloak {
 }
 
 impl WindowCloak {
-    fn apply(hwnds: &[isize]) -> Self {
+    fn apply(hwnds: &[isize]) -> Result<Self, String> {
         let hwnds: Vec<isize> = hwnds.iter().copied().filter(|hwnd| *hwnd != 0).collect();
+        ensure_exclusion_targets(&hwnds)?;
+        let mut applied = Vec::with_capacity(hwnds.len());
         for hwnd in &hwnds {
-            set_cloaked(*hwnd, true);
+            if let Err(error) = set_cloaked(*hwnd, true) {
+                for applied_hwnd in applied.iter().copied() {
+                    let _ = set_cloaked(applied_hwnd, false);
+                }
+                flush_dwm();
+                return Err(error);
+            }
+            applied.push(*hwnd);
         }
         if !hwnds.is_empty() {
             flush_dwm();
         }
-        Self { hwnds }
+        Ok(Self { hwnds })
     }
 }
 
 impl Drop for WindowCloak {
     fn drop(&mut self) {
         for hwnd in &self.hwnds {
-            set_cloaked(*hwnd, false);
+            let _ = set_cloaked(*hwnd, false);
         }
         if !self.hwnds.is_empty() {
             flush_dwm();
@@ -250,7 +269,7 @@ impl Drop for WindowCloak {
 }
 
 #[cfg(windows)]
-fn set_cloaked(hwnd: isize, cloak: bool) {
+fn set_cloaked(hwnd: isize, cloak: bool) -> Result<(), String> {
     use windows::Win32::{
         Foundation::HWND,
         Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK},
@@ -259,17 +278,20 @@ fn set_cloaked(hwnd: isize, cloak: bool) {
     let value: i32 = i32::from(cloak);
     let handle = HWND(hwnd as *mut core::ffi::c_void);
     unsafe {
-        let _ = DwmSetWindowAttribute(
+        DwmSetWindowAttribute(
             handle,
             DWMWA_CLOAK,
             std::ptr::from_ref(&value).cast(),
             std::mem::size_of::<i32>() as u32,
-        );
+        )
+        .map_err(|error| format!("无法从截图中排除应用窗口：{error}"))
     }
 }
 
 #[cfg(not(windows))]
-fn set_cloaked(_hwnd: isize, _cloak: bool) {}
+fn set_cloaked(_hwnd: isize, _cloak: bool) -> Result<(), String> {
+    Err("当前平台不支持应用窗口截图排除".into())
+}
 
 #[cfg(windows)]
 fn flush_dwm() {
@@ -285,29 +307,33 @@ fn flush_dwm() {}
 /// Screen-space bounds of a visible, non-minimized HWND as
 /// `(left, top, right, bottom)`.
 #[cfg(windows)]
-fn visible_window_rect(hwnd: isize) -> Option<(i32, i32, i32, i32)> {
+fn visible_window_rect(hwnd: isize) -> Result<Option<(i32, i32, i32, i32)>, String> {
     use windows::Win32::{
         Foundation::HWND,
-        UI::WindowsAndMessaging::{GetWindowRect, IsIconic, IsWindowVisible},
+        UI::WindowsAndMessaging::{GetWindowRect, IsIconic, IsWindow, IsWindowVisible},
     };
 
     let handle = HWND(hwnd as *mut core::ffi::c_void);
     unsafe {
+        if !IsWindow(Some(handle)).as_bool() {
+            return Err("应用窗口句柄已失效，已阻止发送未经遮罩的屏幕截图".into());
+        }
         if !IsWindowVisible(handle).as_bool() || IsIconic(handle).as_bool() {
-            return None;
+            return Ok(None);
         }
         let mut rect = windows::Win32::Foundation::RECT::default();
-        GetWindowRect(handle, &mut rect).ok()?;
+        GetWindowRect(handle, &mut rect)
+            .map_err(|error| format!("无法读取应用窗口范围：{error}"))?;
         if rect.right <= rect.left || rect.bottom <= rect.top {
-            return None;
+            return Err("应用窗口范围无效，已阻止发送未经遮罩的屏幕截图".into());
         }
-        Some((rect.left, rect.top, rect.right, rect.bottom))
+        Ok(Some((rect.left, rect.top, rect.right, rect.bottom)))
     }
 }
 
 #[cfg(not(windows))]
-fn visible_window_rect(_hwnd: isize) -> Option<(i32, i32, i32, i32)> {
-    None
+fn visible_window_rect(_hwnd: isize) -> Result<Option<(i32, i32, i32, i32)>, String> {
+    Err("当前平台不支持应用窗口截图排除".into())
 }
 
 impl CapturedFrame {
@@ -549,6 +575,11 @@ mod tests {
         assert_eq!(dst.get_pixel(4, 4), src.get_pixel(4, 4));
         assert_eq!(*dst.get_pixel(1, 3), image::Rgba([1, 2, 3, 255]));
         assert_eq!(*dst.get_pixel(2, 2), image::Rgba([1, 2, 3, 255]));
+    }
+
+    #[test]
+    fn capture_exclusion_refuses_an_empty_target_list() {
+        assert!(ensure_exclusion_targets(&[]).is_err());
     }
 
     #[test]
