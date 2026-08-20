@@ -1549,6 +1549,11 @@ fn run_task(
         snapshot.goal = Some(goal.clone());
         snapshot.message = "我先看一眼现在的屏幕…".into();
     });
+    // Publish the phase before the background capture warm-up starts. The
+    // floating webview already exists (hidden), so both surfaces can switch
+    // their Emotion Ball to the recognizing state immediately instead of
+    // waiting for the first model result.
+    emit_floating(&app, "我先看一眼现在的屏幕…", "recognizing");
     let clone = app.clone();
     std::thread::spawn(move || {
         // Own the visibility sequence in the host: both app windows must be

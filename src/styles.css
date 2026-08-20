@@ -793,6 +793,9 @@ button:disabled {
   overflow: visible;
   touch-action: none;
   user-select: none;
+  /* The floating shell is draggable, but the actual ball must still receive
+   * pointer events so the upstream setGaze() API can follow the cursor. */
+  -webkit-app-region: no-drag;
 }
 
 .emotion-ball-host--stage {
@@ -1151,5 +1154,4 @@ html.floating-mode #root::-webkit-scrollbar {
     opacity: 1;
   }
 }
-
 

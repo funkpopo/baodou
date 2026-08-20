@@ -60,6 +60,8 @@ export function EmotionBall({
   const engineRef = useRef<UpstreamEmotionEngine | null>(null);
   const emotionId = emotionIdForPhase(phase, active);
 
+  // Keep one upstream instance for the lifetime of this surface so a
+  // status-label change cannot reset gaze, springs or the current animation.
   useEffect(() => {
     const host = hostRef.current;
     const api = window.EmotionBall;
@@ -83,7 +85,7 @@ export function EmotionBall({
       engine.destroy();
       engineRef.current = null;
     };
-  }, [label, size]);
+  }, [size]);
 
   useEffect(() => {
     engineRef.current?.setEmotion(emotionId);
@@ -112,4 +114,3 @@ export function EmotionBall({
     />
   );
 }
-

@@ -674,6 +674,7 @@ function FloatingApp() {
   const shellRef = useRef<HTMLElement>(null);
   const lastSizeRef = useRef({ width: 0, height: 0 });
   const scheduleSizeRef = useRef<(force?: boolean) => void>(() => undefined);
+  const hasLiveEventRef = useRef(false);
   const currentWindow = getCurrentWindow();
 
   useEffect(() => {
@@ -690,8 +691,20 @@ function FloatingApp() {
 
     let cleanupFloating: (() => void) | undefined;
     let cleanupRecognition: (() => void) | undefined;
+    const syncRuntimePhase = () => {
+      void bridge.runtime().then((runtime) => {
+        if (hasLiveEventRef.current) return;
+        setActive(runtime.phase === "recognizing");
+        const runtimeText = isWaitingSpeech(runtime.message) ? "" : runtime.message;
+        setMessage((current) => {
+          if (current.phase === runtime.phase && current.text === runtimeText) return current;
+          return { ...current, phase: runtime.phase, text: runtimeText };
+        });
+      });
+    };
     void bridge
       .onFloating((payload) => {
+        hasLiveEventRef.current = true;
         setActive(payload.phase === "recognizing");
         setMessage({
           ...payload,
@@ -703,6 +716,7 @@ function FloatingApp() {
       });
     void bridge
       .onRecognition((event) => {
+        hasLiveEventRef.current = true;
         setActive(event.phase === "recognizing");
         setMessage({
           text: isWaitingSpeech(event.detail) ? "" : event.detail,
@@ -713,12 +727,15 @@ function FloatingApp() {
       .then((unlisten) => {
         cleanupRecognition = unlisten;
       });
-    void bridge.runtime().then((runtime) => {
-      setActive(runtime.phase === "recognizing");
-    });
+    // The floating window is created once and can remain hidden between
+    // sessions. Poll until the first live event so a slow webview listener
+    // cannot miss the initial recognizing phase.
+    syncRuntimePhase();
+    const runtimeTimer = window.setInterval(syncRuntimePhase, 800);
     return () => {
       cleanupFloating?.();
       cleanupRecognition?.();
+      window.clearInterval(runtimeTimer);
     };
   }, []);
 
