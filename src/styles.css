@@ -131,16 +131,6 @@ button:disabled {
   color: #717d89;
 }
 
-.topbar-center {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  white-space: nowrap;
-  color: #b6c0c8;
-  font: 500 11px "DM Mono", monospace;
-}
-
 .traffic-dot,
 .status-pip {
   width: 7px;
@@ -155,25 +145,6 @@ button:disabled {
 .status-pip.live {
   background: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-dim), 0 0 12px var(--accent-glow);
-}
-
-.traffic-dot.model-ready {
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-dim), 0 0 12px var(--accent-glow);
-}
-
-.traffic-dot.model-starting,
-.traffic-dot.model-loading,
-.traffic-dot.model-warming,
-.traffic-dot.model-reconnecting {
-  background: #e4b85d;
-  box-shadow: 0 0 0 3px #e4b85d18, 0 0 10px #e4b85d66;
-  animation: pulse-dot 1.4s ease-in-out infinite;
-}
-
-.traffic-dot.model-error {
-  background: #e6816e;
-  box-shadow: 0 0 0 3px #e6816e18, 0 0 10px #e6816e55;
 }
 
 .status-pip.live {
@@ -1086,10 +1057,6 @@ html.floating-mode #root::-webkit-scrollbar {
     column-gap: 6px;
   }
 
-  .topbar-center {
-    font-size: 10px;
-  }
-
   .window-button {
     width: 34px;
   }
@@ -1154,4 +1121,3 @@ html.floating-mode #root::-webkit-scrollbar {
     opacity: 1;
   }
 }
-

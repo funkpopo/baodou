@@ -218,10 +218,6 @@ function MainApp() {
           <span>Baodou</span>
           <small>DESKTOP COMPANION</small>
         </div>
-        <div className="topbar-center">
-          <span className={`traffic-dot model-${runtime.modelStatus}`} />
-          {modelStatusLabel(runtime.modelStatus)}
-        </div>
         <div className="window-tools">
           <button
             className={`window-button settings-button ${view === "settings" ? "is-active" : ""}`}
