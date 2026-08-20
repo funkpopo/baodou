@@ -77,3 +77,9 @@ Windows 产物位于：
 - `src-tauri/target/release/bundle/nsis/`
 
 更多信息见 [docs/architecture.md](docs/architecture.md) 和 [docs/development.md](docs/development.md)。
+
+## 第三方组件
+
+桌面宠物与主界面的表情精灵使用 [sam70361/emotion-ball](https://github.com/sam70361/emotion-ball) 的上游核心实现，原始引擎文件位于 `public/vendor/emotion-ball/`，由 `index.html` 按 `rings → emotions → ball → engine` 顺序加载。
+
+该项目的 `LICENSE` 已随源文件保留。上游默认许可仅允许学习、研究和技术交流，禁止未经授权的商业集成；如 Baodou 用于商业产品，需要先向原作者取得商业授权。

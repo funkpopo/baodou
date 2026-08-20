@@ -12,6 +12,7 @@ import {
   X,
 } from "lucide-react";
 import { bridge } from "./bridge";
+import { EmotionBall } from "./EmotionBall";
 import type { FloatingMessage, ModelConfig, Phase, RuntimeSnapshot } from "./types";
 
 const DEFAULT_GOAL = "帮我观察当前电脑界面，留意最要紧、最清楚的可见内容";
@@ -823,13 +824,7 @@ function FloatingApp() {
       ) : null}
 
       <div className="floating-pet">
-        <div className="bot-orbit orbit-one" />
-        <div className="bot-orbit orbit-two" />
-        <div className="bubble-bot">
-          <span className="bot-eye eye-left" />
-          <span className="bot-eye eye-right" />
-          <span className="bot-mouth" />
-        </div>
+        <EmotionBall phase={message.phase} active={active} size="floating" label="Baodou 悬浮精灵" />
       </div>
     </main>
   );
@@ -860,13 +855,7 @@ function BotStage({
         </div>
       </div>
       <p className="computer-use-detail">{detail}</p>
-      <div className="bot-orbit orbit-one" />
-      <div className="bot-orbit orbit-two" />
-      <div className="bubble-bot" aria-hidden>
-        <span className="bot-eye eye-left" />
-        <span className="bot-eye eye-right" />
-        <span className="bot-mouth" />
-      </div>
+      <EmotionBall phase={phase} active={active} size="stage" label={`Baodou ${status}`} />
     </div>
   );
 }

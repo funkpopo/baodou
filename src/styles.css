@@ -780,7 +780,39 @@ button:disabled {
   z-index: 20;
 }
 
-/* ── Original mascot ── */
+/* ── Upstream Emotion Ball host ──
+ * The SVG and animation rules come from the vendored upstream engine. These
+ * rules only provide the host dimensions required by the two app surfaces. */
+.emotion-ball-host {
+  position: relative;
+  z-index: 2;
+  flex: none;
+  display: block;
+  width: 190px;
+  height: 190px;
+  overflow: visible;
+  touch-action: none;
+  user-select: none;
+}
+
+.emotion-ball-host--stage {
+  width: 190px;
+  height: 190px;
+}
+
+.emotion-ball-host--floating {
+  width: 88px;
+  height: 88px;
+}
+
+.emotion-ball-host svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+
 .bot-stage {
   position: relative;
   flex: 1;
@@ -873,159 +905,6 @@ button:disabled {
   text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.bot-stage::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  bottom: 52px;
-  width: 100px;
-  height: 18px;
-  border-radius: 50%;
-  background: radial-gradient(ellipse, #d7f25a33 0%, transparent 70%);
-  transform: translateX(-50%);
-  filter: blur(6px);
-  pointer-events: none;
-  z-index: 1;
-  transition: opacity var(--dur) ease, width var(--dur) ease;
-}
-
-.bot-stage.is-active::after {
-  width: 130px;
-  opacity: 1;
-  animation: glow-breathe 2.2s ease-in-out infinite;
-}
-
-.bot-stage.is-terminal::after {
-  opacity: 0.5;
-  width: 90px;
-}
-
-.bot-orbit {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  border: 1px solid #d7f25a28;
-  border-radius: 50%;
-  pointer-events: none;
-  box-shadow: 0 0 20px #d7f25a08 inset;
-  transform-origin: center;
-}
-
-.orbit-one {
-  width: 210px;
-  height: 80px;
-  transform: translate(-50%, -50%) rotateX(68deg) rotateZ(-18deg);
-  animation: orbit-spin 10s linear infinite;
-}
-
-.orbit-two {
-  width: 270px;
-  height: 120px;
-  transform: translate(-50%, -50%) rotateX(68deg) rotateZ(24deg);
-  animation: orbit-spin 14s linear infinite reverse;
-  opacity: 0.45;
-}
-
-.bot-stage.is-terminal .bot-orbit {
-  animation-play-state: paused;
-  opacity: 0.18;
-}
-
-.bubble-bot {
-  position: relative;
-  z-index: 2;
-  width: 112px;
-  height: 92px;
-  border: 2px solid #e4fb78;
-  border-radius: 48% 52% 46% 50%;
-  background:
-    radial-gradient(circle at 32% 28%, #f5ffb0 0%, transparent 35%),
-    linear-gradient(155deg, #e8fc88 0%, var(--accent) 40%, #7a9a2e 100%);
-  box-shadow:
-    0 1px 0 #ffffff88 inset,
-    0 -8px 16px #5a702018 inset,
-    0 0 0 10px #d7f25a0a,
-    0 12px 32px #d7f25a44,
-    0 20px 40px #00000050;
-  transform: translateY(10px) rotate(-5deg) translateZ(20px);
-  animation: bot-float 3.6s ease-in-out infinite;
-}
-
-.bot-stage.is-active .bubble-bot {
-  animation: bot-work 1.8s ease-in-out infinite;
-  filter: drop-shadow(0 0 18px #d7f25a55);
-}
-
-.bot-stage.is-terminal .bubble-bot {
-  animation: bot-settle 0.9s var(--ease-out) both;
-}
-
-.bubble-bot::before,
-.bubble-bot::after {
-  content: "";
-  position: absolute;
-  bottom: -9px;
-  width: 18px;
-  height: 20px;
-  border-radius: 50%;
-  background: linear-gradient(160deg, #c4e05a, #8aae32);
-  box-shadow: 0 4px 8px #0004;
-}
-
-.bubble-bot::before {
-  left: 20px;
-}
-
-.bubble-bot::after {
-  right: 20px;
-}
-
-.bot-eye {
-  position: absolute;
-  top: 32px;
-  width: 11px;
-  height: 16px;
-  border-radius: 99px;
-  background: #172014;
-  box-shadow: 0 1px 0 #ffffff22 inset;
-  animation: bot-blink 4.2s infinite;
-}
-
-.eye-left {
-  left: 30px;
-}
-
-.eye-right {
-  right: 30px;
-}
-
-.bot-stage.is-active .bot-eye {
-  animation: bot-blink 2.4s infinite, eye-scan 2.8s ease-in-out infinite;
-}
-
-.bot-mouth {
-  position: absolute;
-  left: 50%;
-  bottom: 24px;
-  width: 20px;
-  height: 8px;
-  border-bottom: 2.5px solid #172014;
-  border-radius: 0 0 50% 50%;
-  transform: translateX(-50%);
-  transition: width var(--dur) ease, height var(--dur) ease;
-}
-
-.bot-stage.is-active .bot-mouth {
-  width: 16px;
-  height: 10px;
-  border-radius: 0 0 60% 60%;
-}
-
-.bot-stage.is-terminal .bot-mouth {
-  width: 24px;
-  border-radius: 0 0 70% 70%;
 }
 
 /* ── Floating spirit window (HWND tracks visible content) ── */
@@ -1213,7 +1092,7 @@ html.floating-mode #root::-webkit-scrollbar {
   }
 }
 
-/* Compact spirit pet — 2D only, stays inside the fixed canvas. */
+/* EmotionBall floating mount — stays inside the fixed 88px canvas. */
 .floating-pet {
   position: relative;
   z-index: 2;
@@ -1227,88 +1106,6 @@ html.floating-mode #root::-webkit-scrollbar {
   -webkit-app-region: drag;
 }
 
-.floating-pet .bot-orbit {
-  left: 50%;
-  top: 50%;
-  animation: none;
-}
-
-.floating-pet .orbit-one {
-  width: 78px;
-  height: 30px;
-  border-color: #d7f25a33;
-  transform: translate(-50%, -50%) rotate(-18deg);
-}
-
-.floating-pet .orbit-two {
-  width: 86px;
-  height: 36px;
-  border-color: #d7f25a22;
-  opacity: 0.5;
-  transform: translate(-50%, -50%) rotate(24deg);
-}
-
-.floating-pet .bubble-bot {
-  width: 72px;
-  height: 58px;
-  transform: translateY(2px) rotate(-5deg);
-  animation: pet-float 3.6s ease-in-out infinite;
-}
-
-.floating-shell.is-active .floating-pet .bubble-bot {
-  animation: pet-work 1.8s ease-in-out infinite;
-  box-shadow:
-    0 1px 0 #ffffff88 inset,
-    0 -8px 16px #5a702018 inset,
-    0 0 0 8px #d7f25a12,
-    0 8px 16px #d7f25a33;
-}
-
-.floating-pet .bot-eye {
-  top: 20px;
-  width: 8px;
-  height: 11px;
-}
-
-.floating-pet .eye-left {
-  left: 18px;
-}
-
-.floating-pet .eye-right {
-  right: 18px;
-}
-
-.floating-shell.is-active .floating-pet .bot-eye {
-  animation: bot-blink 2.4s infinite, eye-scan 2.8s ease-in-out infinite;
-}
-
-.floating-pet .bot-mouth {
-  bottom: 14px;
-  width: 14px;
-  height: 6px;
-}
-
-.floating-shell.is-active .floating-pet .bot-mouth {
-  width: 12px;
-  height: 8px;
-  border-radius: 0 0 60% 60%;
-}
-
-.floating-pet .bubble-bot::before,
-.floating-pet .bubble-bot::after {
-  bottom: -6px;
-  width: 12px;
-  height: 13px;
-}
-
-.floating-pet .bubble-bot::before {
-  left: 12px;
-}
-
-.floating-pet .bubble-bot::after {
-  right: 12px;
-}
-
 @keyframes fade-rise {
   from {
     opacity: 0;
@@ -1317,88 +1114,6 @@ html.floating-mode #root::-webkit-scrollbar {
   to {
     opacity: 1;
     transform: translateY(0);
-  }
-}
-
-@keyframes bot-float {
-  0%,
-  100% {
-    transform: translateY(0) rotate(-5deg) translateZ(20px);
-  }
-  50% {
-    transform: translateY(-10px) rotate(3deg) translateZ(28px);
-  }
-}
-
-@keyframes bot-work {
-  0%,
-  100% {
-    transform: translateY(0) rotate(-4deg) scale(1) translateZ(20px);
-  }
-  25% {
-    transform: translateY(-6px) rotate(2deg) scale(1.03) translateZ(28px);
-  }
-  50% {
-    transform: translateY(-12px) rotate(-2deg) scale(1.02) translateZ(32px);
-  }
-  75% {
-    transform: translateY(-5px) rotate(4deg) scale(1.04) translateZ(26px);
-  }
-}
-
-@keyframes bot-blink {
-  0%,
-  44%,
-  48%,
-  100% {
-    transform: scaleY(1);
-  }
-  46%,
-  47% {
-    transform: scaleY(0.08);
-  }
-}
-
-@keyframes eye-scan {
-  0%,
-  100% {
-    transform: translateX(0);
-  }
-  30% {
-    transform: translateX(2px);
-  }
-  70% {
-    transform: translateX(-2px);
-  }
-}
-
-@keyframes orbit-spin {
-  to {
-    transform: translate(-50%, -50%) rotateX(68deg) rotateZ(360deg);
-  }
-}
-
-@keyframes bot-settle {
-  0% {
-    transform: scale(1.08) rotate(-5deg) translateZ(28px);
-  }
-  60% {
-    transform: scale(0.97) rotate(1deg) translateZ(16px);
-  }
-  100% {
-    transform: scale(1) rotate(0) translateZ(20px);
-  }
-}
-
-@keyframes glow-breathe {
-  0%,
-  100% {
-    opacity: 0.5;
-    transform: translateX(-50%) scaleX(1);
-  }
-  50% {
-    opacity: 0.9;
-    transform: translateX(-50%) scaleX(1.15);
   }
 }
 
@@ -1437,22 +1152,4 @@ html.floating-mode #root::-webkit-scrollbar {
   }
 }
 
-@keyframes pet-float {
-  0%,
-  100% {
-    transform: translateY(2px) rotate(-5deg);
-  }
-  50% {
-    transform: translateY(-4px) rotate(-2deg);
-  }
-}
 
-@keyframes pet-work {
-  0%,
-  100% {
-    transform: translateY(2px) rotate(-4deg);
-  }
-  50% {
-    transform: translateY(-5px) rotate(-1deg);
-  }
-}
