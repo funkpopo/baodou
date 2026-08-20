@@ -65,6 +65,20 @@ const CONTRADICTION_COOLDOWN: Duration = Duration::from_millis(12000);
 const TRAY_SHOW_ID: &str = "show-main";
 const TRAY_EXIT_ID: &str = "quit";
 
+/// Bundled multimodal model layouts, ordered by preference. Keep the
+/// fallback entries for portable installations created before the model
+/// directories were introduced.
+const MODEL_BUNDLE_CANDIDATES: &[(&str, &str)] = &[
+    (
+        "Ornith-1.5/Ornith-1.5-9B-Q4_K_M.gguf",
+        "Ornith-1.5/mmproj-Ornith-1.5-9B-BF16.gguf",
+    ),
+    (
+        "Qwen3.5/Qwen3.5-2B-UD-Q4_K_XL.gguf",
+        "Qwen3.5/mmproj-F16.gguf",
+    )
+];
+
 struct RuntimeState {
     snapshot: Mutex<RuntimeSnapshot>,
 }
@@ -120,6 +134,7 @@ fn default_false() -> bool {
 impl Default for ModelConfig {
     fn default() -> Self {
         let root = asset_root();
+        let (model_path, mmproj_path) = default_model_paths(&root);
         Self {
             server_path: first_existing(&[
                 root.join("llama-server.exe"),
@@ -127,16 +142,8 @@ impl Default for ModelConfig {
             ])
             .to_string_lossy()
             .into(),
-            model_path: root
-                .join("model")
-                .join("Qwen3.5-2B-UD-Q4_K_XL.gguf")
-                .to_string_lossy()
-                .into(),
-            mmproj_path: root
-                .join("model")
-                .join("mmproj-F16.gguf")
-                .to_string_lossy()
-                .into(),
+            model_path: model_path.to_string_lossy().into(),
+            mmproj_path: mmproj_path.to_string_lossy().into(),
             llama_url: env::var("BAODOU_LLAMA_URL").unwrap_or_else(|_| LLAMA_ENDPOINT.into()),
             n_gpu_layers: env_i32("BAODOU_N_GPU_LAYERS"),
             batch_size: env_i32("BAODOU_BATCH_SIZE"),
@@ -414,7 +421,10 @@ mod stream_tests {
 
 #[cfg(test)]
 mod response_tests {
-    use super::{response_text, stream_delta_text, stream_finish_reason, strip_thinking};
+    use super::{
+        bundled_model_paths, default_model_paths, response_text, stream_delta_text,
+        stream_finish_reason, strip_thinking,
+    };
     use serde_json::json;
 
     #[test]
@@ -486,6 +496,25 @@ mod response_tests {
         assert!(!super::is_loopback_endpoint(
             "http://10.0.0.8:8765/v1/chat/completions"
         ));
+    }
+
+    #[test]
+    fn discovers_ornith_model_and_matching_mmproj_in_model_directory() {
+        let root = std::env::temp_dir().join(format!("baodou-model-test-{}", uuid::Uuid::new_v4()));
+        let model_dir = root.join("model").join("Ornith-1.5");
+        std::fs::create_dir_all(&model_dir).expect("create model fixture");
+        let model = model_dir.join("Ornith-1.5-9B-Q4_K_M.gguf");
+        let mmproj = model_dir.join("mmproj-Ornith-1.5-9B-BF16.gguf");
+        std::fs::write(&model, b"model").expect("write model fixture");
+        std::fs::write(&mmproj, b"mmproj").expect("write mmproj fixture");
+
+        assert_eq!(
+            bundled_model_paths(&root),
+            Some((model.clone(), mmproj.clone()))
+        );
+        assert_eq!(default_model_paths(&root), (model, mmproj));
+
+        std::fs::remove_dir_all(root).expect("remove model fixture");
     }
 
     #[test]
@@ -585,22 +614,39 @@ fn portable_root() -> PathBuf {
 /// Asset root prefers the portable exe directory, then the project tree in dev builds.
 fn asset_root() -> PathBuf {
     let portable = portable_root();
-    let portable_model = portable.join("model").join("Qwen3.5-2B-UD-Q4_K_XL.gguf");
-    if portable_model.exists() {
+    if bundled_model_paths(&portable).is_some() {
         return portable;
     }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     if let Some(project_root) = manifest_dir.parent() {
-        let project_model = project_root
-            .join("model")
-            .join("Qwen3.5-2B-UD-Q4_K_XL.gguf");
-        if project_model.exists() {
+        if bundled_model_paths(project_root).is_some() {
             return project_root.to_path_buf();
         }
     }
 
     portable
+}
+
+/// Find a complete model + multimodal projection pair under a portable or
+/// development asset root. A model without its matching `mmproj` is not a
+/// usable vision bundle and must not win discovery.
+fn bundled_model_paths(root: &Path) -> Option<(PathBuf, PathBuf)> {
+    MODEL_BUNDLE_CANDIDATES.iter().find_map(|(model, mmproj)| {
+        let model_path = root.join("model").join(model);
+        let mmproj_path = root.join("model").join(mmproj);
+        (model_path.exists() && mmproj_path.exists()).then_some((model_path, mmproj_path))
+    })
+}
+
+fn default_model_paths(root: &Path) -> (PathBuf, PathBuf) {
+    bundled_model_paths(root).unwrap_or_else(|| {
+        let (model, mmproj) = MODEL_BUNDLE_CANDIDATES[0];
+        (
+            root.join("model").join(model),
+            root.join("model").join(mmproj),
+        )
+    })
 }
 
 fn first_existing(paths: &[PathBuf]) -> PathBuf {
@@ -1214,8 +1260,9 @@ fn recognize(
     }
     let payload = json!({
         "model": "local-vision",
-        // Qwen can otherwise spend its visible output budget in hidden
-        // reasoning phase, leaving `content` empty and returning `length`.
+        // Reasoning-capable vision models can otherwise spend their visible
+        // output budget in a hidden reasoning phase, leaving `content` empty
+        // and returning `length`.
         "temperature": 0.1,
         // The prompt asks for a concise answer, but do not use a ceiling so
         // tight that a model ends a visible sentence half-way through.

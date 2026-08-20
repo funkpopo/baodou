@@ -72,7 +72,7 @@ Rust 在启动识别时创建标签为 `floating` 的独立 Webview 窗口。它
   data/
     baodou.db      # 会话与设置数据库
     config.json    # 模型与接口配置
-  model/           # 本地视觉模型（可随发行包一并分发）
+  model/           # 本地视觉模型包
   llama-server.exe # 可选：同目录自带推理服务
 ```
 

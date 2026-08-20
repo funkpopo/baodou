@@ -49,8 +49,6 @@ npm run tauri:dev
 <portable root>/
   llama-server.exe
   model/
-    Qwen3.5-2B-UD-Q4_K_XL.gguf
-    mmproj-F16.gguf
   data/
     config.json
     baodou.db
