@@ -16,7 +16,6 @@ src-tauri/           Rust 桌面宿主与实时识别 runtime
   ├─ rusqlite        便携式本地数据库
   └─ recognition loop 截屏、视觉识别、结果去重与悬浮窗刷新
 data/                运行后生成：config.json + baodou.db（相对 exe）
-model/               本地模型说明与元数据（模型权重不提交）
 docs/                架构、开发与运行文档
 ```
 
@@ -41,29 +40,31 @@ npm run tauri:dev
 
 运行时不含鼠标、键盘、窗口激活、应用启动或其他电脑控制能力。
 
-## 本地模型模式
+## 用户自定义推理服务
 
-将 `llama-server.exe` 与模型文件放在可执行文件同级目录（或按 `data/config.json` 中的路径配置），应用会自动尝试拉起本地视觉服务：
+项目不内置、发现、选择或推荐任何模型，也不要求固定目录结构。请在应用的配置页填写：
 
-```text
-<portable root>/
-  llama-server.exe
-  model/
-  data/
-    config.json
-    baodou.db
-```
+- 推理服务可执行文件路径；
+- 主模型文件路径；
+- 多模态投影文件路径；
+- OpenAI 兼容接口地址；
+- 由用户决定的 offload、batch、Flash Attention 等运行参数。
 
-也可在启动前手动指定接口：
+这些值保存到可执行文件旁的 `data/config.json`，应用只使用用户保存的路径，不会根据项目目录自动替换或迁移模型。
+
+也可在启动前通过环境变量提供这些值：
 
 ```powershell
+$env:BAODOU_LLAMA_SERVER = "<path-to-server>"
+$env:BAODOU_MODEL_PATH = "<path-to-model>"
+$env:BAODOU_MMPROJ_PATH = "<path-to-mmproj>"
 $env:BAODOU_LLAMA_URL = "http://<host>:8765/v1/chat/completions"
 npm run tauri:dev
 ```
 
 ## 便携式发行
 
-数据库与配置保存在可执行文件旁的 `data/` 目录，便于整包拷贝分发。后续可将模型、配置与宿主整合进同一发行目录，形成 portable 应用。
+数据库与配置保存在可执行文件旁的 `data/` 目录，便于整包拷贝分发。推理服务与模型文件由用户自行管理，应用不复制或打包它们。
 
 ```bat
 npm run build

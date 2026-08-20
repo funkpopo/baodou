@@ -2,16 +2,14 @@ mod capture;
 mod sampling;
 mod textsim;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use capture::ScreenFrame;
-use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use reqwest::blocking::Client;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     env, fs,
-    io::{BufRead, BufReader, Cursor},
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Mutex, OnceLock},
@@ -26,7 +24,6 @@ use tauri::{
 use uuid::Uuid;
 
 const PROTOCOL_VERSION: &str = "2.0.0";
-const LLAMA_ENDPOINT: &str = "http://[IP]:8765/v1/chat/completions";
 const DEFAULT_GOAL: &str = "帮我观察当前电脑界面，留意最要紧、最清楚的可见内容";
 const FLOATING_LABEL: &str = "floating";
 /// Pet-only default HWND. The frontend resizes this to the visible pet +
@@ -48,7 +45,6 @@ const FLUSH_FORCE_TIMEOUT: Duration = Duration::from_millis(1600);
 const MAX_RECOGNITION_TOKENS: u32 = 512;
 const MODEL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const MODEL_WARMUP_TIMEOUT: Duration = Duration::from_secs(45);
 
 // --- P1: sampling & refresh policies (in addition to `sampling` module) ---
 /// Above this share of the screen a changed bbox is treated as a broad change
@@ -65,27 +61,11 @@ const CONTRADICTION_COOLDOWN: Duration = Duration::from_millis(12000);
 const TRAY_SHOW_ID: &str = "show-main";
 const TRAY_EXIT_ID: &str = "quit";
 
-/// Bundled multimodal model layouts, ordered by preference. Keep the
-/// fallback entries for portable installations created before the model
-/// directories were introduced.
-const MODEL_BUNDLE_CANDIDATES: &[(&str, &str)] = &[
-    (
-        "Ornith-1.5/Ornith-1.5-9B-Q4_K_M.gguf",
-        "Ornith-1.5/mmproj-Ornith-1.5-9B-BF16.gguf",
-    ),
-    (
-        "Qwen3.5/Qwen3.5-2B-UD-Q4_K_XL.gguf",
-        "Qwen3.5/mmproj-F16.gguf",
-    )
-];
-
 struct RuntimeState {
     snapshot: Mutex<RuntimeSnapshot>,
 }
 struct ModelState {
     process: Mutex<Option<Child>>,
-    warmed_endpoint: Mutex<Option<String>>,
-    warmup_lock: Mutex<()>,
 }
 impl Default for RuntimeState {
     fn default() -> Self {
@@ -98,8 +78,6 @@ impl Default for ModelState {
     fn default() -> Self {
         Self {
             process: Mutex::new(None),
-            warmed_endpoint: Mutex::new(None),
-            warmup_lock: Mutex::new(()),
         }
     }
 }
@@ -133,18 +111,13 @@ fn default_false() -> bool {
 
 impl Default for ModelConfig {
     fn default() -> Self {
-        let root = asset_root();
-        let (model_path, mmproj_path) = default_model_paths(&root);
         Self {
-            server_path: first_existing(&[
-                root.join("llama-server.exe"),
-                PathBuf::from(r"D:\llama\llama-server.exe"),
-            ])
-            .to_string_lossy()
-            .into(),
-            model_path: model_path.to_string_lossy().into(),
-            mmproj_path: mmproj_path.to_string_lossy().into(),
-            llama_url: env::var("BAODOU_LLAMA_URL").unwrap_or_else(|_| LLAMA_ENDPOINT.into()),
+            // All runtime resources are user-provided. The project does not
+            // identify, bundle, discover or recommend a model.
+            server_path: env::var("BAODOU_LLAMA_SERVER").unwrap_or_default(),
+            model_path: env::var("BAODOU_MODEL_PATH").unwrap_or_default(),
+            mmproj_path: env::var("BAODOU_MMPROJ_PATH").unwrap_or_default(),
+            llama_url: env::var("BAODOU_LLAMA_URL").unwrap_or_default(),
             n_gpu_layers: env_i32("BAODOU_N_GPU_LAYERS"),
             batch_size: env_i32("BAODOU_BATCH_SIZE"),
             ubatch_size: env_i32("BAODOU_UBATCH_SIZE"),
@@ -162,10 +135,12 @@ fn env_i32(key: &str) -> Option<i32> {
 
 fn env_flag(key: &str) -> bool {
     env::var(key)
-        .map(|value| {
-            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on")
-        })
+        .map(|value| env_flag_value(&value))
         .unwrap_or(false)
+}
+
+fn env_flag_value(value: &str) -> bool {
+    value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on")
 }
 
 #[derive(Clone, Serialize)]
@@ -222,8 +197,8 @@ impl Default for RuntimeSnapshot {
             mode: "live screen recognition".into(),
             phase: "idle".into(),
             connected: true,
-            inference_backend: "llama.cpp · local vision".into(),
-            device: "SYCL0 · Intel Arc".into(),
+            inference_backend: "configured local vision service".into(),
+            device: "configured device".into(),
             model_ready: false,
             task_id: None,
             goal: None,
@@ -421,10 +396,7 @@ mod stream_tests {
 
 #[cfg(test)]
 mod response_tests {
-    use super::{
-        bundled_model_paths, default_model_paths, response_text, stream_delta_text,
-        stream_finish_reason, strip_thinking,
-    };
+    use super::{response_text, stream_delta_text, stream_finish_reason, strip_thinking};
     use serde_json::json;
 
     #[test]
@@ -496,25 +468,6 @@ mod response_tests {
         assert!(!super::is_loopback_endpoint(
             "http://10.0.0.8:8765/v1/chat/completions"
         ));
-    }
-
-    #[test]
-    fn discovers_ornith_model_and_matching_mmproj_in_model_directory() {
-        let root = std::env::temp_dir().join(format!("baodou-model-test-{}", uuid::Uuid::new_v4()));
-        let model_dir = root.join("model").join("Ornith-1.5");
-        std::fs::create_dir_all(&model_dir).expect("create model fixture");
-        let model = model_dir.join("Ornith-1.5-9B-Q4_K_M.gguf");
-        let mmproj = model_dir.join("mmproj-Ornith-1.5-9B-BF16.gguf");
-        std::fs::write(&model, b"model").expect("write model fixture");
-        std::fs::write(&mmproj, b"mmproj").expect("write mmproj fixture");
-
-        assert_eq!(
-            bundled_model_paths(&root),
-            Some((model.clone(), mmproj.clone()))
-        );
-        assert_eq!(default_model_paths(&root), (model, mmproj));
-
-        std::fs::remove_dir_all(root).expect("remove model fixture");
     }
 
     #[test]
@@ -609,52 +562,6 @@ fn portable_root() -> PathBuf {
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// Asset root prefers the portable exe directory, then the project tree in dev builds.
-fn asset_root() -> PathBuf {
-    let portable = portable_root();
-    if bundled_model_paths(&portable).is_some() {
-        return portable;
-    }
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if let Some(project_root) = manifest_dir.parent() {
-        if bundled_model_paths(project_root).is_some() {
-            return project_root.to_path_buf();
-        }
-    }
-
-    portable
-}
-
-/// Find a complete model + multimodal projection pair under a portable or
-/// development asset root. A model without its matching `mmproj` is not a
-/// usable vision bundle and must not win discovery.
-fn bundled_model_paths(root: &Path) -> Option<(PathBuf, PathBuf)> {
-    MODEL_BUNDLE_CANDIDATES.iter().find_map(|(model, mmproj)| {
-        let model_path = root.join("model").join(model);
-        let mmproj_path = root.join("model").join(mmproj);
-        (model_path.exists() && mmproj_path.exists()).then_some((model_path, mmproj_path))
-    })
-}
-
-fn default_model_paths(root: &Path) -> (PathBuf, PathBuf) {
-    bundled_model_paths(root).unwrap_or_else(|| {
-        let (model, mmproj) = MODEL_BUNDLE_CANDIDATES[0];
-        (
-            root.join("model").join(model),
-            root.join("model").join(mmproj),
-        )
-    })
-}
-
-fn first_existing(paths: &[PathBuf]) -> PathBuf {
-    paths
-        .iter()
-        .find(|path| path.exists())
-        .cloned()
-        .unwrap_or_else(|| paths[0].clone())
 }
 
 fn data_dir() -> Result<PathBuf, String> {
@@ -769,10 +676,6 @@ fn set_model_config(app: AppHandle, config: ModelConfig) -> Result<ModelConfig, 
 }
 
 fn stop_model(app: &AppHandle) {
-    *app.state::<ModelState>()
-        .warmed_endpoint
-        .lock()
-        .expect("model warmup poisoned") = None;
     if let Some(mut child) = app
         .state::<ModelState>()
         .process
@@ -866,84 +769,24 @@ fn model_process_alive(app: &AppHandle) -> bool {
     }
 }
 
-fn warmup_image_url() -> Result<String, String> {
-    let image = RgbImage::from_pixel(64, 64, Rgb([36, 42, 52]));
-    let mut jpeg = Cursor::new(Vec::new());
-    DynamicImage::ImageRgb8(image)
-        .write_to(&mut jpeg, ImageFormat::Jpeg)
-        .map_err(|error| format!("无法构建视觉预热图片：{error}"))?;
-    Ok(format!(
-        "data:image/jpeg;base64,{}",
-        BASE64.encode(jpeg.into_inner())
-    ))
-}
-
-fn warmup_model(endpoint: &str) -> Result<(), String> {
-    let payload = json!({
-        "model": "local-vision",
-        "temperature": 0,
-        "max_tokens": 1,
-        "cache_prompt": false,
-        "stream": false,
-        "reasoning_format": "none",
-        "chat_template_kwargs": { "enable_thinking": false },
-        "messages": [{
-            "role": "user",
-            "content": [
-                { "type": "text", "text": "/no_think\n仅回答：好" },
-                { "type": "image_url", "image_url": { "url": warmup_image_url()? } }
-            ]
-        }]
-    });
-    model_http_client()
-        .post(endpoint)
-        .timeout(MODEL_WARMUP_TIMEOUT)
-        .json(&payload)
-        .send()
-        .map_err(|error| format!("视觉模型预热请求失败：{error}"))?
-        .error_for_status()
-        .map_err(|error| format!("视觉模型预热失败：{error}"))?
-        .text()
-        .map_err(|error| format!("视觉模型预热响应读取失败：{error}"))?;
-    Ok(())
-}
-
-fn prepare_model(app: &AppHandle, endpoint: &str, ready_message: &str) -> bool {
-    let state = app.state::<ModelState>();
-    let _warmup_guard = state.warmup_lock.lock().expect("model warmup poisoned");
-    if state
-        .warmed_endpoint
-        .lock()
-        .expect("model warmup poisoned")
-        .as_deref()
-        == Some(endpoint)
-    {
-        mark_model_ready(app, ready_message);
-        return true;
-    }
-
-    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
-        snapshot.model_ready = false;
-        snapshot.message = "本地视觉模型已启动，正在预热视觉路径…".into();
-    });
-    match warmup_model(endpoint) {
-        Ok(()) => {
-            *state.warmed_endpoint.lock().expect("model warmup poisoned") =
-                Some(endpoint.to_owned());
-            mark_model_ready(app, ready_message);
-            true
-        }
-        Err(error) => {
-            mark_model_not_ready(app, error);
-            false
-        }
-    }
+fn prepare_model(app: &AppHandle, _endpoint: &str, ready_message: &str) -> bool {
+    // `/health` is the model-load barrier. The first real screen request
+    // lazily initializes the multimodal path, avoiding a duplicate synthetic
+    // image request during application startup.
+    mark_model_ready(app, ready_message);
+    true
 }
 
 fn wait_for_model(app: &AppHandle, endpoint: &str, attempts: u32) -> bool {
     for _ in 0..attempts {
         if llama_health(endpoint) {
             return prepare_model(app, endpoint, "本地视觉模型已就绪");
+        }
+        // A malformed argument list or a missing runtime DLL can make
+        // llama-server exit immediately. Do not turn that into a misleading
+        // 36-second startup timeout.
+        if !model_process_alive(app) {
+            return false;
         }
         std::thread::sleep(Duration::from_millis(400));
     }
@@ -970,13 +813,14 @@ fn start_model(app: AppHandle) {
     let server = PathBuf::from(&config.server_path);
     let model = PathBuf::from(&config.model_path);
     let mmproj = PathBuf::from(&config.mmproj_path);
-    if !server.exists() || !model.exists() || !mmproj.exists() {
+    if config.llama_url.trim().is_empty()
+        || !server.is_file()
+        || !model.is_file()
+        || !mmproj.is_file()
+    {
         mark_model_not_ready(
             &app,
-            format!(
-                "本地模型未就绪：请将 llama-server 与 model 放在 {}",
-                portable_root().display()
-            ),
+            "模型服务程序、主模型文件和 mmproj 文件均需在设置中填写有效路径",
         );
         return;
     }
@@ -1008,6 +852,15 @@ fn start_model(app: AppHandle) {
         "--port".to_string(),
         port.to_string(),
         "--jinja".to_string(),
+        // The app owns the UI and performs the first real multimodal request
+        // lazily, so llama-server's duplicate empty warmup is unnecessary.
+        "--no-warmup".to_string(),
+        "--no-webui".to_string(),
+        // Keep the endpoint useful for the app's live performance panel.
+        "--metrics".to_string(),
+        // Apply the user's projector offload preference through the server's
+        // generic multimodal path; no backend or model is selected here.
+        "--mmproj-offload".to_string(),
         // Context length is intentionally left at 4096: the tuning pass below
         // must not modify `-c`.  A too-small context can make llama.cpp stop
         // before producing an answer, so keep this value stable.
@@ -1031,6 +884,10 @@ fn start_model(app: AppHandle) {
     }
     if config.flash_attn {
         args.push("-fa".to_string());
+        // Current llama.cpp expects an explicit value for --flash-attn.
+        // Passing only `-fa` makes it consume the next argument as a value
+        // and exit before the HTTP server is started.
+        args.push("on".to_string());
     }
 
     match Command::new(&server)
@@ -1047,7 +904,17 @@ fn start_model(app: AppHandle) {
                 .lock()
                 .expect("model poisoned") = Some(child);
             if !wait_for_model(&app, &config.llama_url, 90) {
-                mark_model_not_ready(&app, "本地模型启动超时：推理服务未在预期时间内就绪");
+                if model_process_alive(&app) {
+                    mark_model_not_ready(&app, "本地模型启动超时：推理服务未在预期时间内就绪");
+                } else {
+                    mark_model_not_ready(
+                        &app,
+                        format!(
+                            "llama-server 已退出：请检查启动参数、运行库和模型文件（{}）",
+                            server.display()
+                        ),
+                    );
+                }
             }
         }
         Err(error) => {

@@ -16,7 +16,6 @@ npm run tauri:build
 | `src/` | React/TypeScript main launcher and floating spirit UI |
 | `src-tauri/src/` | Rust recognition runtime and Tauri commands |
 | `src-tauri/icons/` | Windows package icons |
-| `model/` | Model metadata and local model placement notes |
 | `data/` | Portable runtime data (`config.json`, `baodou.db`) created next to the exe |
 | `docs/` | Product and technical documentation |
 

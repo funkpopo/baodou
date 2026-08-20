@@ -21,8 +21,8 @@ const initialRuntime: RuntimeSnapshot = {
   mode: "live screen recognition",
   phase: "idle",
   connected: true,
-  inferenceBackend: "llama.cpp · local vision",
-  device: "SYCL0 · Intel Arc",
+  inferenceBackend: "configured local vision service",
+  device: "configured device",
   modelReady: false,
   taskId: null,
   goal: null,
@@ -403,7 +403,7 @@ function ModelSettingsPage({ modelReady, onBack }: { modelReady: boolean; onBack
               <input
                 value={draft.serverPath}
                 onChange={(event) => updateText("serverPath", event.target.value)}
-                placeholder="D:\\llama\\llama-server.exe"
+                placeholder="选择 llama-server 可执行文件"
                 spellCheck={false}
                 autoComplete="off"
                 disabled={saving}
@@ -415,8 +415,8 @@ function ModelSettingsPage({ modelReady, onBack }: { modelReady: boolean; onBack
             <div className="settings-section-heading">
               <span className="settings-section-index">02</span>
               <div>
-                <h2>视觉模型</h2>
-                <p>主模型与匹配的多模态投影文件必须成对配置。</p>
+                <h2>视觉资源</h2>
+                <p>填写你选择的主模型与匹配的多模态投影文件。</p>
               </div>
             </div>
             <label className="settings-field settings-field-wide">
@@ -424,7 +424,7 @@ function ModelSettingsPage({ modelReady, onBack }: { modelReady: boolean; onBack
               <input
                 value={draft.modelPath}
                 onChange={(event) => updateText("modelPath", event.target.value)}
-                placeholder="…\\model\\Ornith-1.5\\Ornith-1.5-9B-Q4_K_M.gguf"
+                placeholder="选择主模型文件（GGUF）"
                 spellCheck={false}
                 autoComplete="off"
                 disabled={saving}
@@ -435,7 +435,7 @@ function ModelSettingsPage({ modelReady, onBack }: { modelReady: boolean; onBack
               <input
                 value={draft.mmprojPath}
                 onChange={(event) => updateText("mmprojPath", event.target.value)}
-                placeholder="…\\model\\Ornith-1.5\\mmproj-Ornith-1.5-9B-BF16.gguf"
+                placeholder="选择多模态投影文件（mmproj）"
                 spellCheck={false}
                 autoComplete="off"
                 disabled={saving}

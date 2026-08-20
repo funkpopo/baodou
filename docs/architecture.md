@@ -72,11 +72,9 @@ Rust 在启动识别时创建标签为 `floating` 的独立 Webview 窗口。它
   data/
     baodou.db      # 会话与设置数据库
     config.json    # 模型与接口配置
-  model/           # 本地视觉模型包
-  llama-server.exe # 可选：同目录自带推理服务
 ```
 
-后续可将数据库、配置与模型资源整合进单一发行目录或安装包，保证拷贝即用。
+推理服务、主模型与 mmproj 均由用户在配置中提供，不属于项目资源。应用只保存用户提供的路径和运行参数，不复制、打包、发现或替换推理资源。
 
 ## 模型接口
 
@@ -84,15 +82,16 @@ Rust 在启动识别时创建标签为 `floating` 的独立 Webview 窗口。它
 拟人视觉助手：用第一人称短句帮用户观察电脑界面，而不是写检测报告。输出仍收敛为“首句点出最
 重要且明确的可见内容、第二句补充 1–2 项直接相关细节”，并强制：单张截图不得声称时间上的
 “变化”、模糊内容如实说明而非补全、不产生操作建议、步骤、坐标或动作协议。`max_tokens=512`
-与两句摘要匹配（属输出上限，不改动 `-c` 上下文长度）。默认配置写入便携目录下的 `data/config.json`；
+与两句摘要匹配（属输出上限，不改动 `-c` 上下文长度）。默认配置不包含任何模型、服务程序或固定接口地址；用户填写的配置写入便携目录下的 `data/config.json`；
 `nGpuLayers` / `batchSize` / `ubatchSize` / `flashAttn` 等调参项只影响 offload、batch、线程与
-Flash Attention，不触碰 `-c`。
+Flash Attention，不触碰 `-c`；它们没有项目内置的推荐值，由用户根据所选服务、模型和硬件填写。
 
 ## 可观测性
 
 主窗口轮询的 `RuntimeSnapshot` 携带 `rounds` / `skippedRounds` / `requests`（跳帧率）与
 `metrics`（截图、编码、prefill/首 token、生成、总耗时、token、输入类型与置信度分级）；
 服务端 `/metrics` 汇总（prompt eval、cache hit、KV 使用）亦写入其中。推理 HTTP Client
-全局复用连接池，连接超时为 2 秒、单轮请求总超时为 30 秒；服务通过 `/health` 后先执行一次
-固定合成图的视觉 warmup，完成后才标记 ready。`benchmarks/` 提供
+全局复用连接池，连接超时为 2 秒、单轮请求总超时为 30 秒；服务使用 `--no-warmup`，通过
+`/health` 后立即标记 ready，视觉路径在第一张真实截图中懒初始化，避免启动阶段重复的空请求。
+服务同时启用 `--metrics`，便于核对 prompt eval、生成和 KV 指标。`benchmarks/` 提供
 脱敏基准集清单与模型侧评测脚本，用于修改前后对比与准入验收。
