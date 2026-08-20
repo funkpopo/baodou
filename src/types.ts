@@ -38,6 +38,11 @@ export interface ModelConfig {
   modelPath: string;
   mmprojPath: string;
   llamaUrl: string;
+  nGpuLayers?: number | null;
+  batchSize?: number | null;
+  ubatchSize?: number | null;
+  flashAttn?: boolean;
+  multiImageInput?: boolean;
 }
 
 export interface RecognitionEvent {

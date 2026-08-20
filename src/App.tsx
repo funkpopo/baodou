@@ -1,8 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { CircleStop, Minimize2, Play, Sparkles, X } from "lucide-react";
+import {
+  ArrowLeft,
+  Check,
+  CircleStop,
+  Minimize2,
+  Play,
+  Save,
+  Settings,
+  Sparkles,
+  X,
+} from "lucide-react";
 import { bridge } from "./bridge";
-import type { FloatingMessage, Phase, RuntimeSnapshot } from "./types";
+import type { FloatingMessage, ModelConfig, Phase, RuntimeSnapshot } from "./types";
 
 const DEFAULT_GOAL = "帮我观察当前电脑界面，留意最要紧、最清楚的可见内容";
 
@@ -22,6 +32,69 @@ const initialRuntime: RuntimeSnapshot = {
   requests: 0,
   metrics: null,
 };
+
+type MainView = "home" | "settings";
+
+interface ModelConfigDraft {
+  serverPath: string;
+  modelPath: string;
+  mmprojPath: string;
+  llamaUrl: string;
+  nGpuLayers: string;
+  batchSize: string;
+  ubatchSize: string;
+  flashAttn: boolean;
+  multiImageInput: boolean;
+}
+
+const emptyModelConfigDraft: ModelConfigDraft = {
+  serverPath: "",
+  modelPath: "",
+  mmprojPath: "",
+  llamaUrl: "",
+  nGpuLayers: "",
+  batchSize: "",
+  ubatchSize: "",
+  flashAttn: false,
+  multiImageInput: false,
+};
+
+function modelConfigToDraft(config: ModelConfig): ModelConfigDraft {
+  return {
+    serverPath: config.serverPath,
+    modelPath: config.modelPath,
+    mmprojPath: config.mmprojPath,
+    llamaUrl: config.llamaUrl,
+    nGpuLayers: config.nGpuLayers == null ? "" : String(config.nGpuLayers),
+    batchSize: config.batchSize == null ? "" : String(config.batchSize),
+    ubatchSize: config.ubatchSize == null ? "" : String(config.ubatchSize),
+    flashAttn: config.flashAttn ?? false,
+    multiImageInput: config.multiImageInput ?? false,
+  };
+}
+
+function draftToModelConfig(draft: ModelConfigDraft): ModelConfig {
+  const optionalInteger = (value: string) => {
+    const trimmed = value.trim();
+    return trimmed ? Number.parseInt(trimmed, 10) : null;
+  };
+
+  return {
+    serverPath: draft.serverPath.trim(),
+    modelPath: draft.modelPath.trim(),
+    mmprojPath: draft.mmprojPath.trim(),
+    llamaUrl: draft.llamaUrl.trim(),
+    nGpuLayers: optionalInteger(draft.nGpuLayers),
+    batchSize: optionalInteger(draft.batchSize),
+    ubatchSize: optionalInteger(draft.ubatchSize),
+    flashAttn: draft.flashAttn,
+    multiImageInput: draft.multiImageInput,
+  };
+}
+
+function errorMessage(cause: unknown) {
+  return cause instanceof Error ? cause.message : String(cause);
+}
 
 function resolveWindowMode(): "main" | "floating" {
   try {
@@ -53,6 +126,7 @@ function App() {
 function MainApp() {
   const [runtime, setRuntime] = useState(initialRuntime);
   const [error, setError] = useState("");
+  const [view, setView] = useState<MainView>("home");
   const active = runtime.phase === "recognizing";
   const currentWindow = getCurrentWindow();
 
@@ -141,6 +215,17 @@ function MainApp() {
           {runtime.modelReady ? "模型已连接" : "模型未就绪"}
         </div>
         <div className="window-tools">
+          <button
+            className={`window-button settings-button ${view === "settings" ? "is-active" : ""}`}
+            onClick={() => {
+              setError("");
+              setView((current) => (current === "home" ? "settings" : "home"));
+            }}
+            aria-label={view === "settings" ? "返回主界面" : "打开模型配置"}
+            title={view === "settings" ? "返回主界面" : "模型配置"}
+          >
+            {view === "settings" ? <ArrowLeft size={14} /> : <Settings size={14} />}
+          </button>
           <button className="window-button" onClick={() => void currentWindow.minimize()} aria-label="最小化">
             <Minimize2 size={14} />
           </button>
@@ -150,31 +235,308 @@ function MainApp() {
         </div>
       </header>
 
-      <section className="launch-pane">
-        <BotStage active={active} phase={runtime.phase} status={phaseLabel} detail={runtime.message} />
+      {view === "settings" ? (
+        <ModelSettingsPage modelReady={runtime.modelReady} onBack={() => setView("home")} />
+      ) : (
+        <section className="launch-pane">
+          <BotStage active={active} phase={runtime.phase} status={phaseLabel} detail={runtime.message} />
 
-        <div className="launch-actions">
-          {active ? (
-            <button className="launch-button stop pressable" onClick={() => void stop()}>
-              <CircleStop size={18} />
-              停止
-            </button>
-          ) : (
-            <button className="launch-button start pressable" onClick={() => void start()}>
-              <Play size={18} />
-              启动
-            </button>
-          )}
-          <p className="launch-hint">
-            {active
-              ? "Baodou 正在陪你观察，结果会实时刷新。"
-              : "启动后 Baodou 会以悬浮精灵陪伴在桌面一侧。"}
-          </p>
-        </div>
-      </section>
+          <div className="launch-actions">
+            {active ? (
+              <button className="launch-button stop pressable" onClick={() => void stop()}>
+                <CircleStop size={18} />
+                停止
+              </button>
+            ) : (
+              <button className="launch-button start pressable" onClick={() => void start()}>
+                <Play size={18} />
+                启动
+              </button>
+            )}
+            <p className="launch-hint">
+              {active
+                ? "Baodou 正在陪你观察，结果会实时刷新。"
+                : "启动后 Baodou 会以悬浮精灵陪伴在桌面一侧。"}
+            </p>
+          </div>
+        </section>
+      )}
 
       {error && <div className="error-toast">{error}</div>}
     </main>
+  );
+}
+
+function ModelSettingsPage({ modelReady, onBack }: { modelReady: boolean; onBack: () => void }) {
+  const [draft, setDraft] = useState<ModelConfigDraft>(emptyModelConfigDraft);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let mounted = true;
+    void bridge
+      .modelConfig()
+      .then((config) => {
+        if (!mounted) return;
+        setDraft(modelConfigToDraft(config));
+        setLoading(false);
+      })
+      .catch((cause) => {
+        if (!mounted) return;
+        setError(`读取模型配置失败：${errorMessage(cause)}`);
+        setLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  function updateText(field: keyof ModelConfigDraft, value: string) {
+    setSaved(false);
+    setDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  function updateToggle(field: "flashAttn" | "multiImageInput", value: boolean) {
+    setSaved(false);
+    setDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  function validate() {
+    const required: Array<[string, string]> = [
+      ["服务程序路径", draft.serverPath],
+      ["模型文件路径", draft.modelPath],
+      ["mmproj 文件路径", draft.mmprojPath],
+      ["接口地址", draft.llamaUrl],
+    ];
+    const missing = required.find(([, value]) => !value.trim());
+    if (missing) return `${missing[0]}不能为空`;
+
+    const integerFields: Array<[string, string]> = [
+      ["GPU 层数", draft.nGpuLayers],
+      ["批处理大小", draft.batchSize],
+      ["微批处理大小", draft.ubatchSize],
+    ];
+    const invalid = integerFields.find(
+      ([, value]) => value.trim() && !/^-?\d+$/.test(value.trim()),
+    );
+    return invalid ? `${invalid[0]}需要填写整数` : "";
+  }
+
+  async function save() {
+    const validationError = validate();
+    if (validationError) {
+      setSaved(false);
+      setError(validationError);
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    try {
+      const config = await bridge.saveModelConfig(draftToModelConfig(draft));
+      setDraft(modelConfigToDraft(config));
+      setSaved(true);
+    } catch (cause) {
+      setSaved(false);
+      setError(`保存模型配置失败：${errorMessage(cause)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="settings-page" aria-labelledby="settings-title">
+      <div className="settings-heading">
+        <button className="settings-back pressable" onClick={onBack} aria-label="返回主界面">
+          <ArrowLeft size={15} />
+        </button>
+        <div className="settings-heading-copy">
+          <span className="settings-kicker">MODEL / RUNTIME</span>
+          <h1 id="settings-title">模型配置</h1>
+          <p>配置本地视觉服务与模型文件，保存后会自动重新连接。</p>
+        </div>
+        <div className={`settings-live ${modelReady ? "ready" : ""}`}>
+          <span className="traffic-dot" />
+          {modelReady ? "服务在线" : "等待服务"}
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="settings-loading">
+          <span className="settings-loading-dot" />
+          正在读取本地配置…
+        </div>
+      ) : (
+        <>
+          <form
+            id="model-settings-form"
+            className="settings-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void save();
+            }}
+          >
+          <section className="settings-section">
+            <div className="settings-section-heading">
+              <span className="settings-section-index">01</span>
+              <div>
+                <h2>服务连接</h2>
+                <p>llama-server 的启动程序与 OpenAI 兼容接口。</p>
+              </div>
+            </div>
+            <label className="settings-field settings-field-wide">
+              <span>接口地址</span>
+              <input
+                value={draft.llamaUrl}
+                onChange={(event) => updateText("llamaUrl", event.target.value)}
+                placeholder="http://127.0.0.1:8765/v1/chat/completions"
+                spellCheck={false}
+                autoComplete="off"
+                disabled={saving}
+              />
+              <small>远程地址也可以使用，但本地模型自动启动只适用于本机服务。</small>
+            </label>
+            <label className="settings-field settings-field-wide">
+              <span>llama-server 程序</span>
+              <input
+                value={draft.serverPath}
+                onChange={(event) => updateText("serverPath", event.target.value)}
+                placeholder="D:\\llama\\llama-server.exe"
+                spellCheck={false}
+                autoComplete="off"
+                disabled={saving}
+              />
+            </label>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section-heading">
+              <span className="settings-section-index">02</span>
+              <div>
+                <h2>视觉模型</h2>
+                <p>主模型与匹配的多模态投影文件必须成对配置。</p>
+              </div>
+            </div>
+            <label className="settings-field settings-field-wide">
+              <span>模型文件</span>
+              <input
+                value={draft.modelPath}
+                onChange={(event) => updateText("modelPath", event.target.value)}
+                placeholder="…\\model\\Ornith-1.5\\Ornith-1.5-9B-Q4_K_M.gguf"
+                spellCheck={false}
+                autoComplete="off"
+                disabled={saving}
+              />
+            </label>
+            <label className="settings-field settings-field-wide">
+              <span>mmproj 文件</span>
+              <input
+                value={draft.mmprojPath}
+                onChange={(event) => updateText("mmprojPath", event.target.value)}
+                placeholder="…\\model\\Ornith-1.5\\mmproj-Ornith-1.5-9B-BF16.gguf"
+                spellCheck={false}
+                autoComplete="off"
+                disabled={saving}
+              />
+            </label>
+          </section>
+
+          <section className="settings-section settings-section-last">
+            <div className="settings-section-heading">
+              <span className="settings-section-index">03</span>
+              <div>
+                <h2>性能选项</h2>
+                <p>留空使用 llama-server 默认值；上下文长度由运行时固定管理。</p>
+              </div>
+            </div>
+            <div className="settings-grid">
+              <label className="settings-field">
+                <span>GPU 层数</span>
+                <input
+                  inputMode="numeric"
+                  value={draft.nGpuLayers}
+                  onChange={(event) => updateText("nGpuLayers", event.target.value)}
+                  placeholder="默认"
+                  disabled={saving}
+                />
+              </label>
+              <label className="settings-field">
+                <span>批处理大小</span>
+                <input
+                  inputMode="numeric"
+                  value={draft.batchSize}
+                  onChange={(event) => updateText("batchSize", event.target.value)}
+                  placeholder="默认"
+                  disabled={saving}
+                />
+              </label>
+              <label className="settings-field">
+                <span>微批处理大小</span>
+                <input
+                  inputMode="numeric"
+                  value={draft.ubatchSize}
+                  onChange={(event) => updateText("ubatchSize", event.target.value)}
+                  placeholder="默认"
+                  disabled={saving}
+                />
+              </label>
+            </div>
+            <div className="settings-toggles">
+              <label className="settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={draft.flashAttn}
+                  onChange={(event) => updateToggle("flashAttn", event.target.checked)}
+                  disabled={saving}
+                />
+                <span className="settings-switch" />
+                <span>
+                  <strong>Flash Attention</strong>
+                  <small>减少注意力计算的显存开销</small>
+                </span>
+              </label>
+              <label className="settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={draft.multiImageInput}
+                  onChange={(event) => updateToggle("multiImageInput", event.target.checked)}
+                  disabled={saving}
+                />
+                <span className="settings-switch" />
+                <span>
+                  <strong>多图输入</strong>
+                  <small>同时发送缩略图与局部裁剪，默认关闭</small>
+                </span>
+              </label>
+            </div>
+          </section>
+
+          </form>
+
+          <div className="settings-actions">
+            <div className="settings-feedback" role="status" aria-live="polite">
+              {error ? <span className="settings-feedback-error">{error}</span> : null}
+              {!error && saved ? (
+                <span className="settings-feedback-success">
+                  <Check size={13} /> 配置已保存，服务正在重新连接
+                </span>
+              ) : null}
+            </div>
+            <button
+              className="settings-save pressable"
+              type="submit"
+              form="model-settings-form"
+              disabled={saving}
+            >
+              {saving ? <span className="button-spinner" /> : <Save size={15} />}
+              {saving ? "正在保存" : "保存并应用"}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
   );
 }
 
