@@ -11,7 +11,7 @@ use std::{
     env, fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, ChildStderr, Command, Stdio},
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -99,6 +99,11 @@ struct ModelConfig {
     ubatch_size: Option<i32>,
     #[serde(default)]
     flash_attn: bool,
+    /// Whether llama-server should run its startup warmup. It is user
+    /// controlled because the trade-off is startup time versus first-use
+    /// latency and depends on the selected runtime/model.
+    #[serde(default)]
+    warmup: bool,
     /// Opt-in single-request multi-image ("thumbnail + crop"). Off by default
     /// until multi-image input is verified stable on the deployed model.
     #[serde(default = "default_false")]
@@ -122,6 +127,7 @@ impl Default for ModelConfig {
             batch_size: env_i32("BAODOU_BATCH_SIZE"),
             ubatch_size: env_i32("BAODOU_UBATCH_SIZE"),
             flash_attn: env_flag("BAODOU_FLASH_ATTN"),
+            warmup: env_flag("BAODOU_WARMUP"),
             multi_image_input: env_flag("BAODOU_MULTI_IMAGE"),
         }
     }
@@ -143,6 +149,87 @@ fn env_flag_value(value: &str) -> bool {
     value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on")
 }
 
+/// Normalize paths pasted from Explorer, PowerShell or a shell command.
+/// Quotation marks are transport syntax, not part of the Windows path.
+fn normalize_user_path(value: &str) -> String {
+    let mut value = value.trim();
+    loop {
+        let bytes = value.as_bytes();
+        let quoted = bytes.len() >= 2
+            && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+                || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''));
+        if !quoted {
+            break;
+        }
+        value = value[1..value.len() - 1].trim();
+    }
+    value.to_owned()
+}
+
+fn normalize_model_config(mut config: ModelConfig) -> ModelConfig {
+    config.server_path = normalize_user_path(&config.server_path);
+    config.model_path = normalize_user_path(&config.model_path);
+    config.mmproj_path = normalize_user_path(&config.mmproj_path);
+    config.llama_url = config.llama_url.trim().to_owned();
+    config
+}
+
+#[cfg(test)]
+mod model_status_tests {
+    use super::{extract_log_percent, model_log_update, normalize_user_path};
+
+    #[test]
+    fn removes_shell_quotes_from_user_paths() {
+        assert_eq!(
+            normalize_user_path(r#""D:\llama-sycl\llama-server.exe""#),
+            r#"D:\llama-sycl\llama-server.exe"#
+        );
+        assert_eq!(normalize_user_path("  D:\\model.gguf  "), "D:\\model.gguf");
+    }
+
+    #[test]
+    fn extracts_progress_percent_from_server_log() {
+        assert_eq!(extract_log_percent("loading tensors: 42.5%"), Some(42.5));
+        assert_eq!(extract_log_percent("no progress here"), None);
+    }
+
+    #[test]
+    fn maps_model_lifecycle_log_lines_to_visible_states() {
+        assert_eq!(
+            model_log_update("srv load_model: loading model"),
+            Some(("loading", Some(10.0), "正在读取模型权重…".into()))
+        );
+        assert_eq!(
+            model_log_update("loaded multimodal model"),
+            Some((
+                "loading",
+                Some(60.0),
+                "多模态投影已载入，正在初始化推理图…".into()
+            ))
+        );
+        assert_eq!(
+            model_log_update("warming up"),
+            Some(("warming", Some(90.0), "正在执行启动预热…".into()))
+        );
+        assert_eq!(
+            model_log_update("server listening on 127.0.0.1:8765"),
+            Some((
+                "loading",
+                Some(98.0),
+                "服务端口已监听，正在确认可用状态…".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn maps_error_log_lines_to_error_state() {
+        let (status, progress, detail) = model_log_update("ERROR failed to load model").unwrap();
+        assert_eq!(status, "error");
+        assert_eq!(progress, None);
+        assert!(detail.contains("ERROR failed to load model"));
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeSnapshot {
@@ -153,6 +240,10 @@ struct RuntimeSnapshot {
     inference_backend: String,
     device: String,
     model_ready: bool,
+    /// Observable llama-server lifecycle, separate from the recognition phase.
+    model_status: String,
+    model_progress: Option<f64>,
+    model_detail: String,
     task_id: Option<String>,
     goal: Option<String>,
     message: String,
@@ -200,6 +291,9 @@ impl Default for RuntimeSnapshot {
             inference_backend: "configured local vision service".into(),
             device: "configured device".into(),
             model_ready: false,
+            model_status: "unconfigured".into(),
+            model_progress: None,
+            model_detail: "请在设置中填写推理服务、模型和 mmproj 路径。".into(),
             task_id: None,
             goal: None,
             message: "我在桌边呢，随时可以帮你看屏幕。".into(),
@@ -601,7 +695,7 @@ fn load_model_config() -> ModelConfig {
     if let Ok(path) = config_path() {
         if let Ok(raw) = fs::read_to_string(&path) {
             if let Ok(config) = serde_json::from_str::<ModelConfig>(&raw) {
-                return config;
+                return normalize_model_config(config);
             }
         }
     }
@@ -613,6 +707,7 @@ fn load_model_config() -> ModelConfig {
             |row| row.get::<_, String>(0),
         ) {
             if let Ok(config) = serde_json::from_str::<ModelConfig>(&value) {
+                let config = normalize_model_config(config);
                 let _ = persist_config_file(&config);
                 return config;
             }
@@ -657,17 +752,18 @@ fn set_model_config(app: AppHandle, config: ModelConfig) -> Result<ModelConfig, 
         return Err("模型程序、模型文件、MMPROJ 和接口 URL 都不能为空".into());
     }
 
-    let config = ModelConfig {
-        server_path: config.server_path.trim().into(),
-        model_path: config.model_path.trim().into(),
-        mmproj_path: config.mmproj_path.trim().into(),
-        llama_url: config.llama_url.trim().into(),
+    let config = normalize_model_config(ModelConfig {
+        server_path: config.server_path,
+        model_path: config.model_path,
+        mmproj_path: config.mmproj_path,
+        llama_url: config.llama_url,
         n_gpu_layers: config.n_gpu_layers,
         batch_size: config.batch_size,
         ubatch_size: config.ubatch_size,
         flash_attn: config.flash_attn,
+        warmup: config.warmup,
         multi_image_input: config.multi_image_input,
-    };
+    });
     persist_model_config(&config)?;
     stop_model(&app);
     let app_clone = app.clone();
@@ -739,17 +835,126 @@ fn llama_health(endpoint: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn set_model_status(
+    app: &AppHandle,
+    status: &str,
+    progress: Option<f64>,
+    detail: impl Into<String>,
+) {
+    let detail = detail.into();
+    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+        snapshot.model_status = status.into();
+        snapshot.model_progress = progress.map(|value| value.clamp(0.0, 100.0));
+        snapshot.model_detail = detail.clone();
+    });
+}
+
+fn extract_log_percent(line: &str) -> Option<f64> {
+    let percent = line.find('%')?;
+    let bytes = line.as_bytes();
+    let mut start = percent;
+    while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'.') {
+        start -= 1;
+    }
+    line.get(start..percent)?.parse::<f64>().ok()
+}
+
+fn model_log_detail(line: &str) -> String {
+    // Keep the complete diagnostic. The frontend wraps long error details;
+    // truncating here can hide the actual missing DLL, argument or path.
+    format!("服务日志：{}", line.trim())
+}
+
+fn model_log_update(line: &str) -> Option<(&'static str, Option<f64>, String)> {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("error") || lower.contains("failed") || lower.contains("exception") {
+        return Some(("error", None, model_log_detail(line)));
+    }
+
+    if let Some(progress) = extract_log_percent(line) {
+        return Some((
+            "loading",
+            Some(progress),
+            format!("模型加载进度 {progress:.0}%"),
+        ));
+    }
+
+    if lower.contains("warmup") || lower.contains("warming up") {
+        return Some(("warming", Some(90.0), "正在执行启动预热…".into()));
+    }
+    if lower.contains("loading model") || lower.contains("load_model") {
+        return Some(("loading", Some(10.0), "正在读取模型权重…".into()));
+    }
+    if lower.contains("loaded multimodal model")
+        || lower.contains("loaded mmproj")
+        || lower.contains("load multimodal")
+    {
+        return Some((
+            "loading",
+            Some(60.0),
+            "多模态投影已载入，正在初始化推理图…".into(),
+        ));
+    }
+    if lower.contains("initializing") || (lower.contains("init") && lower.contains("slot")) {
+        return Some(("loading", Some(80.0), "正在初始化推理槽位…".into()));
+    }
+    if lower.contains("model loaded") || lower.contains("model_load") {
+        return Some((
+            "loading",
+            Some(95.0),
+            "模型已载入，正在等待服务健康检查…".into(),
+        ));
+    }
+    if lower.contains("listening on") {
+        return Some((
+            "loading",
+            Some(98.0),
+            "服务端口已监听，正在确认可用状态…".into(),
+        ));
+    }
+    None
+}
+
+fn spawn_model_log_reader(app: &AppHandle, stderr: ChildStderr) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if let Some((status, progress, detail)) = model_log_update(&line) {
+                set_model_status(&app, status, progress, detail);
+            }
+        }
+    });
+}
+
 fn mark_model_ready(app: &AppHandle, message: &str) {
     update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
         snapshot.model_ready = true;
+        snapshot.model_status = "ready".into();
+        snapshot.model_progress = Some(100.0);
+        snapshot.model_detail = message.into();
         snapshot.message = message.into();
     });
 }
 
 fn mark_model_not_ready(app: &AppHandle, message: impl Into<String>) {
+    let message = message.into();
     update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
         snapshot.model_ready = false;
-        snapshot.message = message.into();
+        snapshot.model_status = "error".into();
+        snapshot.model_progress = None;
+        snapshot.model_detail = message.clone();
+        snapshot.message = message;
+    });
+}
+
+fn mark_model_unconfigured(app: &AppHandle, message: impl Into<String>) {
+    let message = message.into();
+    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+        snapshot.model_ready = false;
+        snapshot.model_status = "unconfigured".into();
+        snapshot.model_progress = None;
+        snapshot.model_detail = message.clone();
+        snapshot.message = message;
     });
 }
 
@@ -801,26 +1006,55 @@ fn start_model(app: AppHandle) {
     }
 
     if model_process_alive(&app) {
+        let progress = app
+            .state::<RuntimeState>()
+            .snapshot
+            .lock()
+            .expect("runtime poisoned")
+            .model_progress;
+        set_model_status(
+            &app,
+            "loading",
+            progress.or(Some(0.0)),
+            "正在等待推理服务就绪…",
+        );
         update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
-            if !snapshot.model_ready {
-                snapshot.message = "正在等待本地视觉模型就绪…".into();
-            }
+            snapshot.model_ready = false;
+            snapshot.message = "正在等待本地视觉模型就绪…".into();
         });
-        let _ = wait_for_model(&app, &config.llama_url, 90);
+        if !wait_for_model(&app, &config.llama_url, 90) && model_process_alive(&app) {
+            mark_model_not_ready(&app, "本地模型启动超时：推理服务未在预期时间内就绪");
+        }
         return;
     }
 
     let server = PathBuf::from(&config.server_path);
     let model = PathBuf::from(&config.model_path);
     let mmproj = PathBuf::from(&config.mmproj_path);
-    if config.llama_url.trim().is_empty()
-        || !server.is_file()
-        || !model.is_file()
-        || !mmproj.is_file()
-    {
-        mark_model_not_ready(
+    if config.llama_url.trim().is_empty() {
+        mark_model_unconfigured(
             &app,
-            "模型服务程序、主模型文件和 mmproj 文件均需在设置中填写有效路径",
+            "接口地址未填写，请先在设置中填写有效的 llama-server 接口地址",
+        );
+        return;
+    }
+
+    let invalid_paths: Vec<String> = [
+        ("模型服务程序", &server),
+        ("主模型文件", &model),
+        ("mmproj 文件", &mmproj),
+    ]
+    .into_iter()
+    .filter(|(_, path)| !path.is_file())
+    .map(|(label, path)| format!("{label}：{}", path.display()))
+    .collect();
+    if !invalid_paths.is_empty() {
+        mark_model_unconfigured(
+            &app,
+            format!(
+                "以下配置路径无效：{}。请在设置中检查文件是否存在。",
+                invalid_paths.join("；")
+            ),
         );
         return;
     }
@@ -837,6 +1071,7 @@ fn start_model(app: AppHandle) {
     let port = parts.next().unwrap_or("8765");
     let host = parts.next().unwrap_or("127.0.0.1");
 
+    set_model_status(&app, "starting", Some(0.0), "正在启动推理服务…");
     update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
         snapshot.model_ready = false;
         snapshot.message = "正在启动本地视觉模型…".into();
@@ -852,9 +1087,6 @@ fn start_model(app: AppHandle) {
         "--port".to_string(),
         port.to_string(),
         "--jinja".to_string(),
-        // The app owns the UI and performs the first real multimodal request
-        // lazily, so llama-server's duplicate empty warmup is unnecessary.
-        "--no-warmup".to_string(),
         "--no-webui".to_string(),
         // Keep the endpoint useful for the app's live performance panel.
         "--metrics".to_string(),
@@ -869,6 +1101,11 @@ fn start_model(app: AppHandle) {
         "--threads".to_string(),
         "6".to_string(),
     ];
+    if config.warmup {
+        args.push("--warmup".to_string());
+    } else {
+        args.push("--no-warmup".to_string());
+    }
     // P3 server tuning knobs: GPU offload, batch sizes and Flash Attention.
     if let Some(ngl) = config.n_gpu_layers {
         args.push("-ngl".to_string());
@@ -895,10 +1132,13 @@ fn start_model(app: AppHandle) {
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
     {
-        Ok(child) => {
+        Ok(mut child) => {
+            if let Some(stderr) = child.stderr.take() {
+                spawn_model_log_reader(&app, stderr);
+            }
             *app.state::<ModelState>()
                 .process
                 .lock()
@@ -944,6 +1184,9 @@ fn supervise_model(app: AppHandle) {
         update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
             if snapshot.model_ready {
                 snapshot.model_ready = false;
+                snapshot.model_status = "reconnecting".into();
+                snapshot.model_progress = None;
+                snapshot.model_detail = "推理服务连接已断开，正在重试…".into();
                 snapshot.message = "本地视觉模型连接已断开，正在重试…".into();
             }
         });

@@ -24,6 +24,9 @@ const initialRuntime: RuntimeSnapshot = {
   inferenceBackend: "configured local vision service",
   device: "configured device",
   modelReady: false,
+  modelStatus: "unconfigured",
+  modelProgress: null,
+  modelDetail: "请在设置中填写推理服务、模型和 mmproj 路径。",
   taskId: null,
   goal: null,
   message: "我在桌边呢，随时可以帮你看屏幕。",
@@ -44,6 +47,7 @@ interface ModelConfigDraft {
   batchSize: string;
   ubatchSize: string;
   flashAttn: boolean;
+  warmup: boolean;
   multiImageInput: boolean;
 }
 
@@ -56,6 +60,7 @@ const emptyModelConfigDraft: ModelConfigDraft = {
   batchSize: "",
   ubatchSize: "",
   flashAttn: false,
+  warmup: false,
   multiImageInput: false,
 };
 
@@ -69,6 +74,7 @@ function modelConfigToDraft(config: ModelConfig): ModelConfigDraft {
     batchSize: config.batchSize == null ? "" : String(config.batchSize),
     ubatchSize: config.ubatchSize == null ? "" : String(config.ubatchSize),
     flashAttn: config.flashAttn ?? false,
+    warmup: config.warmup ?? false,
     multiImageInput: config.multiImageInput ?? false,
   };
 }
@@ -88,6 +94,7 @@ function draftToModelConfig(draft: ModelConfigDraft): ModelConfig {
     batchSize: optionalInteger(draft.batchSize),
     ubatchSize: optionalInteger(draft.ubatchSize),
     flashAttn: draft.flashAttn,
+    warmup: draft.warmup,
     multiImageInput: draft.multiImageInput,
   };
 }
@@ -211,8 +218,8 @@ function MainApp() {
           <small>DESKTOP COMPANION</small>
         </div>
         <div className="topbar-center">
-          <span className={`traffic-dot ${runtime.modelReady ? "ready" : ""}`} />
-          {runtime.modelReady ? "模型已连接" : "模型未就绪"}
+          <span className={`traffic-dot model-${runtime.modelStatus}`} />
+          {modelStatusLabel(runtime.modelStatus)}
         </div>
         <div className="window-tools">
           <button
@@ -240,6 +247,7 @@ function MainApp() {
       ) : (
         <section className="launch-pane">
           <BotStage active={active} phase={runtime.phase} status={phaseLabel} detail={runtime.message} />
+          <ModelLoadStatus runtime={runtime} />
 
           <div className="launch-actions">
             {active ? (
@@ -264,6 +272,49 @@ function MainApp() {
 
       {error && <div className="error-toast">{error}</div>}
     </main>
+  );
+}
+
+function modelStatusLabel(status: string) {
+  return (
+    {
+      unconfigured: "未配置",
+      starting: "启动中",
+      loading: "加载中",
+      warming: "预热中",
+      ready: "已就绪",
+      reconnecting: "重连中",
+      error: "模型错误",
+    }[status] ?? "状态未知"
+  );
+}
+
+function ModelLoadStatus({ runtime }: { runtime: RuntimeSnapshot }) {
+  const progress = runtime.modelProgress;
+  const status = runtime.modelStatus;
+  const hasProgress = typeof progress === "number" && Number.isFinite(progress);
+  const progressLabel = hasProgress ? `${Math.round(progress)}%` : "等待服务日志";
+
+  return (
+    <section
+      className={`model-load-status model-status-${status} ${hasProgress ? "" : "is-indeterminate"}`}
+      aria-live="polite"
+    >
+      <div className="model-load-status-head">
+        <div>
+          <span className="model-load-status-kicker">MODEL SERVICE</span>
+          <strong>{modelStatusLabel(status)}</strong>
+        </div>
+        <span className="model-load-status-percent">{progressLabel}</span>
+      </div>
+      <div className="model-load-status-track" aria-label={`模型加载进度：${progressLabel}`}>
+        <span
+          className="model-load-status-fill"
+          style={{ width: hasProgress ? `${Math.max(0, Math.min(100, progress ?? 0))}%` : "0%" }}
+        />
+      </div>
+      <p title={runtime.modelDetail}>{runtime.modelDetail}</p>
+    </section>
   );
 }
 
@@ -298,7 +349,7 @@ function ModelSettingsPage({ modelReady, onBack }: { modelReady: boolean; onBack
     setDraft((current) => ({ ...current, [field]: value }));
   }
 
-  function updateToggle(field: "flashAttn" | "multiImageInput", value: boolean) {
+  function updateToggle(field: "flashAttn" | "warmup" | "multiImageInput", value: boolean) {
     setSaved(false);
     setDraft((current) => ({ ...current, [field]: value }));
   }
@@ -495,6 +546,19 @@ function ModelSettingsPage({ modelReady, onBack }: { modelReady: boolean; onBack
                 <span>
                   <strong>Flash Attention</strong>
                   <small>减少注意力计算的显存开销</small>
+                </span>
+              </label>
+              <label className="settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={draft.warmup}
+                  onChange={(event) => updateToggle("warmup", event.target.checked)}
+                  disabled={saving}
+                />
+                <span className="settings-switch" />
+                <span>
+                  <strong>启动预热</strong>
+                  <small>启动时预热模型视觉路径，降低首次识别延迟但会延长启动时间</small>
                 </span>
               </label>
               <label className="settings-toggle">

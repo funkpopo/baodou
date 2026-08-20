@@ -24,6 +24,9 @@ export interface RuntimeSnapshot {
   inferenceBackend: string;
   device: string;
   modelReady: boolean;
+  modelStatus: string;
+  modelProgress: number | null;
+  modelDetail: string;
   taskId: string | null;
   goal: string | null;
   message: string;
@@ -42,6 +45,7 @@ export interface ModelConfig {
   batchSize?: number | null;
   ubatchSize?: number | null;
   flashAttn?: boolean;
+  warmup?: boolean;
   multiImageInput?: boolean;
 }
 

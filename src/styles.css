@@ -157,6 +157,25 @@ button:disabled {
   box-shadow: 0 0 0 3px var(--accent-dim), 0 0 12px var(--accent-glow);
 }
 
+.traffic-dot.model-ready {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim), 0 0 12px var(--accent-glow);
+}
+
+.traffic-dot.model-starting,
+.traffic-dot.model-loading,
+.traffic-dot.model-warming,
+.traffic-dot.model-reconnecting {
+  background: #e4b85d;
+  box-shadow: 0 0 0 3px #e4b85d18, 0 0 10px #e4b85d66;
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+.traffic-dot.model-error {
+  background: #e6816e;
+  box-shadow: 0 0 0 3px #e6816e18, 0 0 10px #e6816e55;
+}
+
 .status-pip.live {
   animation: pulse-dot 1.6s ease-in-out infinite;
 }
@@ -573,6 +592,112 @@ button:disabled {
   display: grid;
   gap: 10px;
   justify-items: center;
+}
+
+.model-load-status {
+  flex: none;
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid #232d2c;
+  border-radius: 12px;
+  background: #101719cc;
+  box-shadow: 0 6px 18px #0000002b, inset 0 1px 0 #ffffff05;
+}
+
+.model-load-status-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.model-load-status-head > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.model-load-status-kicker {
+  color: #687871;
+  font: 500 8px "DM Mono", monospace;
+  letter-spacing: 0.14em;
+}
+
+.model-load-status-head strong {
+  overflow: hidden;
+  color: #d9e3d9;
+  font-size: 12px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-load-status-percent {
+  flex: none;
+  color: #a9ba91;
+  font: 500 10px "DM Mono", monospace;
+}
+
+.model-load-status-track {
+  position: relative;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #26312d;
+}
+
+.model-load-status-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #9ebd3e, var(--accent));
+  box-shadow: 0 0 12px #d7f25a66;
+  transition: width 260ms var(--ease-out);
+}
+
+.model-load-status.is-indeterminate .model-load-status-fill {
+  width: 38% !important;
+  animation: loading-bar 1.25s ease-in-out infinite;
+}
+
+.model-load-status p {
+  min-height: 15px;
+  margin: 0;
+  overflow: hidden;
+  color: #77847e;
+  font-size: 10px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-load-status.model-status-ready {
+  border-color: #33452c;
+}
+
+.model-load-status.model-status-ready .model-load-status-percent {
+  color: var(--accent);
+}
+
+.model-load-status.model-status-error {
+  border-color: #55352f;
+  background: #1a1314cc;
+}
+
+.model-load-status.model-status-error .model-load-status-head strong,
+.model-load-status.model-status-error p {
+  color: #e9a28e;
+}
+
+.model-load-status.model-status-error p {
+  overflow: auto;
+  max-height: 150px;
+  padding-right: 4px;
+  text-overflow: clip;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .launch-button {
@@ -1284,6 +1409,16 @@ html.floating-mode #root::-webkit-scrollbar {
   }
   50% {
     opacity: 0.45;
+  }
+}
+
+@keyframes loading-bar {
+  0% {
+    transform: translateX(-120%);
+  }
+  50%,
+  100% {
+    transform: translateX(280%);
   }
 }
 
