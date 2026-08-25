@@ -149,6 +149,7 @@ button:disabled {
 }
 
 .status-pip.live {
+  will-change: opacity;
   animation: pulse-dot 1.6s ease-in-out infinite;
 }
 
@@ -765,6 +766,12 @@ button:disabled {
   overflow: visible;
   touch-action: none;
   user-select: none;
+  /* Keep the frequently updated SVG on a compositor layer. This is a hint;
+   * WebView2 can still choose a safe software path for blocked drivers. */
+  transform: translate3d(0, 0, 0);
+  transform-origin: 50% 50%;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
   /* The floating shell is draggable, but the actual ball must still receive
    * pointer events so the upstream setGaze() API can follow the cursor. */
   -webkit-app-region: no-drag;
@@ -785,6 +792,14 @@ button:disabled {
   width: 100%;
   height: 100%;
   overflow: visible;
+  transform: translate3d(0, 0, 0);
+  transform-origin: 50% 50%;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.emotion-ball-host[data-animation-active="true"] {
+  will-change: transform;
 }
 
 

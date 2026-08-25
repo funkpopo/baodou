@@ -299,6 +299,7 @@ export const EmotionBall = forwardRef<EmotionBallHandle, EmotionBallProps>(funct
     <div
       ref={hostRef}
       className={`emotion-ball-host emotion-ball-host--${size}`}
+      data-animation-active={active ? "true" : "false"}
       data-emotion-id={emotionId}
       role="img"
       aria-label={label}

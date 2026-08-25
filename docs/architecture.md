@@ -11,6 +11,20 @@ React 悬浮精灵窗 ◀── floating-message ──────────�
                                                    └─ 语义去重 / 置信度分级后推送主窗口和置顶悬浮窗
 ```
 
+## 动效与图形加速
+
+Windows 版本的两个 WebView2 窗口默认传入 `--enable-gpu`，同时保留 Tauri
+默认的 WebView2 特性禁用参数；不使用 `--ignore-gpu-blocklist`，因此驱动黑名单、
+远程桌面或虚拟机环境仍可以安全回退到系统允许的渲染路径。
+
+EmotionBall 当前是 `SVG + requestAnimationFrame`，不是 WebGL。GPU 主要负责 SVG
+图层的合成和光栅化，动画状态与路径字符串仍由 JavaScript 更新，所以单纯强制 WebGL
+不会自动提升这个组件的帧率。启动时会探测 WebGL2/WebGL 能力并写入
+`html[data-graphics]`，用于诊断；检测失败时 SVG 继续工作。频繁更新的精灵层使用
+`translate3d`、`backface-visibility` 和有条件的 `will-change` 合成提示，隐藏悬浮窗
+不会持续消费帧循环。应用始终保持完整动效，不读取或遵循系统的“减少动态效果”设置；
+只有窗口不可见时才暂停对应的动画循环。
+
 ## 交互模型
 
 主窗口只提供一个 **启动 / 停止** 按钮：

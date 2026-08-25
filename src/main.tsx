@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { applyGraphicsHints } from "./graphics";
 import "./styles.css";
 
 function markFloatingMode() {
@@ -20,6 +21,7 @@ function markFloatingMode() {
 }
 
 markFloatingMode();
+applyGraphicsHints();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode><App /></React.StrictMode>,

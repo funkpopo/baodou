@@ -24,7 +24,8 @@
         "skipTaskbar": false,
         "center": true,
         "visible": true,
-        "focus": true
+        "focus": true,
+        "additionalBrowserArgs": "--enable-gpu --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"
       },
       {
         "label": "floating",
@@ -44,7 +45,8 @@
         "skipTaskbar": true,
         "visible": false,
         "focus": false,
-        "center": false
+        "center": false,
+        "additionalBrowserArgs": "--enable-gpu --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"
       }
     ],
     "security": {
