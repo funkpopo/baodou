@@ -4,11 +4,14 @@ import {
   ArrowLeft,
   Check,
   CircleStop,
+  Coffee,
+  Home,
   Minimize2,
   Play,
   Save,
   Settings,
   Sparkles,
+  Sunrise,
   X,
 } from "lucide-react";
 import { bridge } from "./bridge";
@@ -107,9 +110,8 @@ function errorMessage(cause: unknown) {
 
 function resolveWindowMode(): "main" | "floating" {
   try {
-    if (getCurrentWindow().label === "floating") {
-      return "floating";
-    }
+    const label = getCurrentWindow().label;
+    if (label === "floating") return "floating";
   } catch {
     // Browser preview or non-Tauri host.
   }
@@ -125,10 +127,10 @@ function resolveWindowMode(): "main" | "floating" {
 }
 
 function App() {
-  if (resolveWindowMode() === "floating") {
+  const mode = resolveWindowMode();
+  if (mode === "floating") {
     return <FloatingApp />;
   }
-
   return <MainApp />;
 }
 
@@ -614,10 +616,6 @@ function ModelSettingsPage({ modelReady, onBack }: { modelReady: boolean; onBack
 
 const WAITING_TEXT = "我先看一眼现在的屏幕…";
 
-/** 1.2: 右键菜单临时撑大的窗口尺寸（resize 保留右下角锚点，精灵不会跳位）。 */
-const MENU_WIDTH = 188;
-const MENU_HEIGHT = 232;
-
 function isWaitingSpeech(text: string) {
   const value = text.trim();
   return (
@@ -643,10 +641,16 @@ function measureFloatingShell(shell: HTMLElement) {
   const gap = Number.parseFloat(styles.columnGap || styles.gap) || 0;
   const pet = shell.querySelector<HTMLElement>(".floating-pet");
   const speech = shell.querySelector<HTMLElement>(".floating-speech");
+  const rail = shell.querySelector<HTMLElement>(".floating-rail");
   const petW = pet?.offsetWidth ?? 88;
   const petH = pet?.offsetHeight ?? 88;
+  const railW = rail?.offsetWidth ?? 0;
+  const railH = rail?.offsetHeight ?? 0;
   if (!speech) {
-    return { width: Math.ceil(padX + petW), height: Math.ceil(padY + petH) };
+    return {
+      width: Math.ceil(padX + petW + (rail ? gap + railW : 0)),
+      height: Math.ceil(padY + Math.max(petH, railH)),
+    };
   }
 
   // WebView's initial containing block is the current HWND. Measure inside a
@@ -670,8 +674,8 @@ function measureFloatingShell(shell: HTMLElement) {
   host.remove();
 
   return {
-    width: Math.ceil(padX + petW + gap + speechW + 8),
-    height: Math.ceil(padY + Math.max(petH, speechH) + 6),
+    width: Math.ceil(padX + petW + (rail ? gap + railW : 0) + gap + speechW + 8),
+    height: Math.ceil(padY + Math.max(petH, railH, speechH) + 6),
   };
 }
 
@@ -682,10 +686,6 @@ function FloatingApp() {
     updatedAt: "",
   });
   const [active, setActive] = useState(false);
-  /** 2.4: 识别循环是否处于暂停（仅用于右键菜单可用性）。 */
-  const [paused, setPaused] = useState(false);
-  /** 1.2: 自绘右键菜单。 */
-  const [menuOpen, setMenuOpen] = useState(false);
   /** 1.1: 最近一次表情提示。 */
   const [hint, setHint] = useState<string | null>(null);
   const ballRef = useRef<EmotionBallHandle>(null);
@@ -725,7 +725,6 @@ function FloatingApp() {
       void bridge.runtime().then((runtime) => {
         if (hasLiveEventRef.current) return;
         setActive(runtime.phase === "recognizing");
-        setPaused(!!runtime.paused);
         const runtimeText = isWaitingSpeech(runtime.message) ? "" : runtime.message;
         setMessage((current) => {
           if (current.phase === runtime.phase && current.text === runtimeText) return current;
@@ -738,7 +737,6 @@ function FloatingApp() {
       .onFloating((payload) => {
         hasLiveEventRef.current = true;
         setActive(payload.phase === "recognizing");
-        setPaused(payload.phase === "paused");
         setHint(payload.emotionHint ?? null);
         setMessage({
           ...payload,
@@ -752,7 +750,6 @@ function FloatingApp() {
       .onRecognition((event) => {
         hasLiveEventRef.current = true;
         setActive(event.phase === "recognizing");
-        setPaused(false);
         setHint(event.emotionHint ?? null);
         setMessage({
           text: isWaitingSpeech(event.detail) ? "" : event.detail,
@@ -767,7 +764,6 @@ function FloatingApp() {
       .onRuntime((runtime) => {
         if (hasLiveEventRef.current) return;
         setActive(runtime.phase === "recognizing");
-        setPaused(!!runtime.paused);
         const runtimeText = isWaitingSpeech(runtime.message) ? "" : runtime.message;
         setMessage((current) => {
           if (current.phase === runtime.phase && current.text === runtimeText) return current;
@@ -853,25 +849,25 @@ function FloatingApp() {
     scheduleSizeRef.current(true);
   }, [message.text, message.phase]);
 
-  // 1.2: 菜单打开时窗口可能不够高，临时撑大 HWND；关闭后恢复。
+  // 3.x: 小憩消息气泡几秒后自动收起，避免整个暂停期一直占着气泡；
+  // 仅当暂停态未被新消息替换时才清除，恢复观察会推送新气泡。
   useEffect(() => {
-    if (!menuOpen) return;
-    const schedule = scheduleSizeRef.current;
-    void bridge.resizeFloating(MENU_WIDTH, MENU_HEIGHT);
-    const onWindowBlur = () => setMenuOpen(false);
-    window.addEventListener("blur", onWindowBlur);
-    window.addEventListener("click", onWindowBlur);
-    return () => {
-      window.removeEventListener("blur", onWindowBlur);
-      window.removeEventListener("click", onWindowBlur);
-      schedule(true);
-    };
-  }, [menuOpen]);
+    if (message.phase !== "paused" || !message.text) return undefined;
+    const dismissed = message.text;
+    const timer = window.setTimeout(() => {
+      setMessage((current) =>
+        current.phase === "paused" && current.text === dismissed
+          ? { ...current, text: "" }
+          : current,
+      );
+    }, 6000);
+    return () => window.clearTimeout(timer);
+  }, [message.text, message.phase]);
 
   function dragWindow(event: React.MouseEvent<HTMLElement>) {
     if (
       event.button !== 0 ||
-      (event.target as HTMLElement).closest("button, .floating-pet, .floating-menu")
+      (event.target as HTMLElement).closest("button, .floating-pet")
     ) {
       return;
     }
@@ -917,17 +913,6 @@ function FloatingApp() {
     }, 280);
   }
 
-  function openMenu(event: React.MouseEvent<HTMLElement>) {
-    event.preventDefault();
-    event.stopPropagation();
-    setMenuOpen(true);
-  }
-
-  function runMenuAction(action: () => Promise<unknown> | void) {
-    setMenuOpen(false);
-    void Promise.resolve(action()).catch(() => undefined);
-  }
-
   async function closeAndStop() {
     try {
       // Closing the companion is also the user's stop action. The runtime
@@ -938,13 +923,16 @@ function FloatingApp() {
     }
   }
 
+  // 3.x: 精灵右侧的竖向图标按钮列（替代独立右键菜单窗口）。
+  const paused = message.phase === "paused";
+
   return (
     <main
       ref={shellRef}
       className={`floating-shell ${active ? "is-active" : ""}`}
       data-tauri-drag-region
       onMouseDown={dragWindow}
-      onContextMenu={openMenu}
+      onContextMenu={(event) => event.preventDefault()}
     >
       {message.text ? (
         <div className="floating-speech" role="status" aria-live="polite">
@@ -970,7 +958,7 @@ function FloatingApp() {
         onPointerUp={onPetPointerUp}
         role="button"
         tabIndex={-1}
-        aria-label="Baodou 精灵：单击打开主界面，双击立刻看一眼，右键打开菜单"
+        aria-label="Baodou 精灵：单击打开主界面，双击立刻看一眼"
       >
         <EmotionBall
           ref={ballRef}
@@ -982,69 +970,49 @@ function FloatingApp() {
         />
       </div>
 
-      {menuOpen ? (
-        <div
-          className="floating-menu"
-          role="menu"
-          onClick={(event) => event.stopPropagation()}
+      <div className="floating-rail" role="toolbar" aria-label="Baodou 精灵快捷操作">
+        {paused ? (
+          <button
+            className="floating-rail-button"
+            title="恢复观察"
+            aria-label="恢复观察"
+            onClick={() =>
+              void bridge.resumeRecognition().catch(() => undefined)
+            }
+          >
+            <Sunrise size={11} />
+          </button>
+        ) : (
+          <button
+            className="floating-rail-button"
+            title="暂停 10 分钟"
+            aria-label="暂停 10 分钟"
+            disabled={!active}
+            onClick={() =>
+              void bridge.pauseRecognition(10).catch(() => undefined)
+            }
+          >
+            <Coffee size={11} />
+          </button>
+        )}
+        <button
+          className="floating-rail-button"
+          title="打开主界面"
+          aria-label="打开主界面"
+          onClick={() => void bridge.focusMain().catch(() => undefined)}
         >
-          <button
-            role="menuitem"
-            className="floating-menu-item"
-            onClick={() => runMenuAction(() => void bridge.companionPeek())}
-          >
-            👀 立刻看一眼
-          </button>
-          <button
-            role="menuitem"
-            className="floating-menu-item"
-            disabled={paused || !active}
-            onClick={() => runMenuAction(() => bridge.pauseRecognition(10))}
-          >
-            😴 暂停 10 分钟
-          </button>
-          <button
-            role="menuitem"
-            className="floating-menu-item"
-            disabled={paused || !active}
-            onClick={() => runMenuAction(() => bridge.pauseRecognition(60))}
-          >
-            🛌 暂停 1 小时
-          </button>
-          <button
-            role="menuitem"
-            className="floating-menu-item"
-            disabled={!paused}
-            onClick={() => runMenuAction(() => bridge.resumeRecognition())}
-          >
-            ☀️ 恢复观察
-          </button>
-          <button
-            role="menuitem"
-            className="floating-menu-item"
-            onClick={() => runMenuAction(() => void bridge.focusMain())}
-          >
-            🏠 打开主界面
-          </button>
-          <button
-            role="menuitem"
-            className="floating-menu-item floating-menu-item--danger"
-            onClick={() => {
-              setMenuOpen(false);
-              void closeAndStop();
-            }}
-          >
-            ⏹ 关闭并停止
-          </button>
-          <button
-            role="menuitem"
-            className="floating-menu-item floating-menu-item--danger"
-            onClick={() => runMenuAction(() => void bridge.exitApp())}
-          >
-            ✖ 退出 Baodou
-          </button>
-        </div>
-      ) : null}
+          <Home size={11} />
+        </button>
+        <button
+          className="floating-rail-button floating-rail-button--danger"
+          title="关闭悬浮窗并停止识别"
+          aria-label="关闭悬浮窗并停止识别"
+          onClick={() => void closeAndStop()}
+        >
+          <CircleStop size={11} />
+        </button>
+      </div>
+
     </main>
   );
 }

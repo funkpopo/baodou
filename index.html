@@ -12,8 +12,9 @@
       //   floating pet -> fully transparent (HWND-level transparency)
       (function () {
         try {
+          var mode = new URLSearchParams(window.location.search).get("window");
           var floating =
-            new URLSearchParams(window.location.search).get("window") === "floating" ||
+            mode === "floating" ||
             window.location.hash === "#floating" ||
             document.title.toLowerCase().includes("floating");
           if (floating) document.documentElement.classList.add("floating-mode");

@@ -36,9 +36,8 @@ const FLOATING_WIDTH: f64 = 104.0;
 const FLOATING_HEIGHT: f64 = 104.0;
 const FLOATING_MIN_WIDTH: f64 = 104.0;
 const FLOATING_MIN_HEIGHT: f64 = 104.0;
-const FLOATING_MAX_WIDTH: f64 = 480.0;
+const FLOATING_MAX_WIDTH: f64 = 520.0;
 const FLOATING_MAX_HEIGHT: f64 = 240.0;
-
 // --- P0: streamed display throttle (sentence-first, then 120–200 ms) ---
 const FLUSH_FIRST_CHARS: usize = 26;
 const FLUSH_THROTTLE: Duration = Duration::from_millis(150);
@@ -1857,6 +1856,8 @@ fn recognition_loop(
                 Some(until) if Instant::now() < until => true,
                 Some(_) => {
                     *guard = None;
+                    // 到期自动恢复：同样置 peek，避免首帧“无变化”长休眠。
+                    runtime_state.peek.store(true, Ordering::Relaxed);
                     update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
                         snapshot.paused = false;
                         snapshot.message = "休息结束，我继续看啦～".into();
@@ -2213,6 +2214,9 @@ fn resume_recognition(app: AppHandle, state: State<'_, RuntimeState>) -> Runtime
     if !was_paused {
         return state.snapshot.lock().expect("runtime poisoned").clone();
     }
+    // 暂停期间画面大概率没变化，恢复后首帧会命中“无变化→休眠等待”分支；
+    // 置 peek 绕过采样间隔与抑制窗口，让恢复后立刻做一次全帧识别。
+    state.peek.store(true, Ordering::Relaxed);
     let snapshot = update_snapshot_emit(&app, &state, |s| {
         s.paused = false;
         s.message = "我继续看啦～".into();
@@ -2522,6 +2526,7 @@ pub fn run() {
                 );
                 let _ = window.hide();
             }
+
 
             let handle = app.handle().clone();
             std::thread::spawn(move || supervise_model(handle));

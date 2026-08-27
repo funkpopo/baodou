@@ -7,8 +7,9 @@ import "./styles.css";
 function markFloatingMode() {
   try {
     const params = new URLSearchParams(window.location.search);
+    const mode = params.get("window");
     const isFloating =
-      params.get("window") === "floating" ||
+      mode === "floating" ||
       window.location.hash === "#floating" ||
       document.title.toLowerCase().includes("floating");
     if (isFloating) {

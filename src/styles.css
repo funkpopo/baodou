@@ -924,7 +924,8 @@ html.floating-mode #root::-webkit-scrollbar {
   gap: 8px;
   width: max-content;
   height: max-content;
-  max-width: 468px;
+  /* 3.x: 侧栏(28) + 精灵(88) + 间隙/内边距(32) + 气泡(348) ≈ 496，留余量到 500。 */
+  max-width: 500px;
   margin: 0;
   padding: 8px;
   overflow: hidden;
@@ -1097,56 +1098,61 @@ html.floating-mode #root::-webkit-scrollbar {
   touch-action: none;
 }
 
-/* 1.2: 自绘右键菜单。窗口临时擑大，菜单固定在右上角。 */
-.floating-menu {
-  position: fixed;
-  top: 6px;
-  right: 6px;
-  z-index: 30;
+/* 3.x: 精灵右侧的竖向图标按钮栏（替代原独立右键菜单窗口）。
+   深色胶囊底座 + 20px 小图标按钮，高度不超过 88px 精灵。 */
+.floating-rail {
+  flex: none;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  width: 176px;
-  padding: 6px;
+  gap: 3px;
+  padding: 3px;
   box-sizing: border-box;
-  border: 1.5px solid #e4fb78;
-  border-radius: 12px;
-  background: #f4fbe0;
-  box-shadow: 0 8px 22px #00000038;
-  animation: speech-pop 0.16s var(--ease-out) both;
+  border: 1px solid #2a3344;
+  border-radius: 11px;
+  background: #10151f;
+  box-shadow: 0 3px 10px #00000052;
+  -webkit-app-region: no-drag;
+  animation: speech-pop 0.18s var(--ease-out) both;
 }
 
-.floating-menu-item {
-  display: flex;
+.floating-rail-button {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 6px 8px;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  line-height: 0;
   border: none;
-  border-radius: 8px;
+  border-radius: 7px;
+  color: #9fb0c8;
   background: transparent;
-  color: #1c2812;
-  font-size: 12px;
-  font-weight: 700;
-  text-align: left;
   cursor: pointer;
+  transition: background 0.12s var(--ease-out), color 0.12s var(--ease-out);
 }
 
-.floating-menu-item:hover:not(:disabled) {
-  background: #e2f5a8;
+.floating-rail-button svg {
+  display: block;
+  flex: none;
 }
 
-.floating-menu-item:disabled {
-  opacity: 0.4;
+.floating-rail-button:hover:not(:disabled) {
+  color: #e4fb78;
+  background: #ffffff14;
+}
+
+.floating-rail-button:disabled {
+  opacity: 0.35;
   cursor: default;
 }
 
-.floating-menu-item--danger {
-  color: #8c2f2f;
+.floating-rail-button--danger {
+  color: #e08a8a;
 }
 
-.floating-menu-item--danger:hover:not(:disabled) {
-  background: #f7d9d9;
+.floating-rail-button--danger:hover:not(:disabled) {
+  color: #ff9d9d;
+  background: #ff00001a;
 }
 
 @keyframes fade-rise {
