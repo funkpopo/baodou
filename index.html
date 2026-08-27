@@ -1,28 +1,69 @@
 <!doctype html>
-<html lang="zh-CN" style="background: transparent;">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#090b10" />
     <title>baodou</title>
+    <script>
+      // Decide the window mode before any CSS or script bundle runs, so the
+      // very first paint already has the right backdrop (no white flash):
+      //   main window  -> opaque dark, matching the app theme
+      //   floating pet -> fully transparent (HWND-level transparency)
+      (function () {
+        try {
+          var floating =
+            new URLSearchParams(window.location.search).get("window") === "floating" ||
+            window.location.hash === "#floating" ||
+            document.title.toLowerCase().includes("floating");
+          if (floating) document.documentElement.classList.add("floating-mode");
+        } catch (error) {
+          /* main window backdrop is the safe default */
+        }
+      })();
+    </script>
     <style>
-      html, body, #root {
+      html,
+      body,
+      #root {
         margin: 0;
         width: 100%;
         height: 100%;
-        background: transparent !important;
-        background-color: rgba(0, 0, 0, 0) !important;
         overflow: hidden;
       }
+      /* Main window: opaque dark backdrop, immune to WebView2's white default. */
+      html:not(.floating-mode),
+      html:not(.floating-mode) body,
+      html:not(.floating-mode) #root {
+        background: #090b10 !important;
+        background-color: #090b10 !important;
+      }
+      /* Floating window: transparency requires a fully transparent page. */
+      html.floating-mode,
+      html.floating-mode body,
+      html.floating-mode #root {
+        background: transparent !important;
+        background-color: rgba(0, 0, 0, 0) !important;
+      }
     </style>
+    <!-- Web fonts load asynchronously: first paint uses system fallbacks and
+         never waits on the network. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap"
+      media="print"
+      onload="this.media='all'"
+    />
   </head>
-  <body style="background: transparent;">
+  <body>
     <div id="root"></div>
     <!-- Upstream emotion-ball runtime: data -> SVG renderer -> animation engine. -->
-    <script src="/vendor/emotion-ball/rings.js"></script>
-    <script src="/vendor/emotion-ball/emotions.js"></script>
-    <script src="/vendor/emotion-ball/ball.js"></script>
-    <script src="/vendor/emotion-ball/engine.js"></script>
+    <script defer src="/vendor/emotion-ball/rings.js"></script>
+    <script defer src="/vendor/emotion-ball/emotions.js"></script>
+    <script defer src="/vendor/emotion-ball/ball.js"></script>
+    <script defer src="/vendor/emotion-ball/engine.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

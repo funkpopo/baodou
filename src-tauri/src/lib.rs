@@ -21,6 +21,7 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
+    webview::PageLoadEvent,
     AppHandle, Emitter, LogicalPosition, Manager, Position, State, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, WindowEvent,
 };
@@ -2442,6 +2443,20 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// Set once the main webview finished its first page load. Guards both the
+/// startup reveal and the fallback timer, so a later reload (dev HMR, WebView
+/// crash recovery) never re-shows a window the user deliberately hid.
+static MAIN_WINDOW_REVEALED: AtomicBool = AtomicBool::new(false);
+
+/// Reveal the main window only once, right after the page has loaded, so the
+/// user never sees a blank WebView frame during startup.
+fn reveal_main_window_once(app: &AppHandle) {
+    if MAIN_WINDOW_REVEALED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    show_main_window(app);
+}
+
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::new(app)?;
     let show = MenuItem::with_id(app, TRAY_SHOW_ID, "显示主界面", true, None::<&str>)?;
@@ -2472,6 +2487,14 @@ pub fn run() {
     tauri::Builder::default()
         .manage(RuntimeState::default())
         .manage(ModelState::default())
+        // The main window is created hidden (tauri.conf.json `visible: false`)
+        // and revealed here only once the page finished loading, so startup
+        // never flashes an empty white WebView.
+        .on_page_load(|webview, payload| {
+            if payload.event() == PageLoadEvent::Finished && webview.label() == "main" {
+                reveal_main_window_once(webview.app_handle());
+            }
+        })
         .setup(|app| {
             let _ = data_dir().map_err(std::io::Error::other)?;
             let _ = database().map_err(std::io::Error::other)?;
@@ -2502,6 +2525,15 @@ pub fn run() {
 
             let handle = app.handle().clone();
             std::thread::spawn(move || supervise_model(handle));
+
+            // Startup fallback: if the frontend never finishes loading (broken
+            // bundle, WebView error page), still reveal the main window so the
+            // app is never reduced to a taskbar-less invisible process.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(8));
+                reveal_main_window_once(&handle);
+            });
 
             let handle = app.handle().clone();
             std::thread::spawn(move || poll_server_metrics(handle));
