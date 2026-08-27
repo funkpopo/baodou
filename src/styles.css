@@ -1092,6 +1092,65 @@ html.floating-mode #root::-webkit-scrollbar {
   -webkit-app-region: drag;
 }
 
+/* 1.2: 精灵本体可点击（单击/双击/右键），拖拽由组件自行判定超阈值后触发。 */
+.floating-pet.is-clickable {
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  touch-action: none;
+}
+
+/* 1.2: 自绘右键菜单。窗口临时擑大，菜单固定在右上角。 */
+.floating-menu {
+  position: fixed;
+  top: 6px;
+  right: 6px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 176px;
+  padding: 6px;
+  box-sizing: border-box;
+  border: 1.5px solid #e4fb78;
+  border-radius: 12px;
+  background: #f4fbe0;
+  box-shadow: 0 8px 22px #00000038;
+  animation: speech-pop 0.16s var(--ease-out) both;
+}
+
+.floating-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #1c2812;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.floating-menu-item:hover:not(:disabled) {
+  background: #e2f5a8;
+}
+
+.floating-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.floating-menu-item--danger {
+  color: #8c2f2f;
+}
+
+.floating-menu-item--danger:hover:not(:disabled) {
+  background: #f7d9d9;
+}
+
 @keyframes fade-rise {
   from {
     opacity: 0;

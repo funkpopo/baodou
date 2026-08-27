@@ -113,11 +113,37 @@ export interface EmotionBallProps {
   active?: boolean;
   size?: "stage" | "floating";
   label?: string;
+  /**
+   * 1.1: 轻量语义提示（来自 Rust 端 classify_emotion_hint）。
+   * 存在时优先于 phase 决定表情，并触发对应动作。
+   */
+  hint?: string | null;
 }
+
+/** 1.1: 语义提示 → 表情 ID（vendor/emotion-ball/emotions.js 中已注册的 32 个表情）。 */
+const HINT_EMOTION: Record<string, string> = {
+  error: "34", // 出错
+  alert: "17", // 慌张
+  message: "13", // 惊讶
+  unclear: "11", // 疑惑
+  progress: "32", // 处理中
+  focused: "16", // 专注
+  rest: "00", // 睡眠
+  neutral: "",
+};
+
+/** 1.1: 语义提示 → 附加动作。 */
+const HINT_ACTION: Record<string, "burst" | "bounce"> = {
+  error: "burst",
+  alert: "burst",
+  message: "bounce",
+  progress: "bounce",
+};
 
 function emotionIdForPhase(phase: Phase | string, active: boolean) {
   if (phase === "error") return "34";
   if (phase === "stopped") return "41";
+  if (phase === "paused") return "00"; // 暂停 = 打瞌睡
   if (phase === "recognizing" || active) return "40";
   return "02";
 }
@@ -128,13 +154,16 @@ export const EmotionBall = forwardRef<EmotionBallHandle, EmotionBallProps>(funct
     active = phase === "recognizing",
     size = "stage",
     label = "Baodou Emotion Ball",
+    hint = null,
   },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<EmotionBallHandle | null>(null);
   const boundsRef = useRef<DOMRectReadOnly | null>(null);
-  const emotionId = emotionIdForPhase(phase, active);
+  // 1.1: 提示优先；无提示（或 neutral）时回落到 phase 常规映射。
+  const hintEmotion = hint ? HINT_EMOTION[hint] || null : null;
+  const emotionId = hintEmotion || emotionIdForPhase(phase, active);
 
   // Keep the entire upstream surface available to callers without exposing
   // the DOM host or making React own any of the engine's animation state.
@@ -282,6 +311,16 @@ export const EmotionBall = forwardRef<EmotionBallHandle, EmotionBallProps>(funct
   useEffect(() => {
     engineRef.current?.setEmotion(emotionId);
   }, [emotionId]);
+
+  // 1.1: 提示变化时触发一次性动作（burst/bounce）。
+  useEffect(() => {
+    if (!hint) return;
+    const engine = engineRef.current;
+    if (!engine) return;
+    const action = HINT_ACTION[hint];
+    if (action === "burst") engine.burst(10);
+    else if (action === "bounce") engine.bounce();
+  }, [hint]);
 
   function updateGaze(event: PointerEvent<HTMLDivElement>) {
     const bounds = boundsRef.current ?? event.currentTarget.getBoundingClientRect();

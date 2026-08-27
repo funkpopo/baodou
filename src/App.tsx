@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { bridge } from "./bridge";
 import { EmotionBall } from "./EmotionBall";
+import type { EmotionBallHandle } from "./EmotionBall";
 import type { FloatingMessage, ModelConfig, Phase, RuntimeSnapshot } from "./types";
 
 const DEFAULT_GOAL = "帮我观察当前电脑界面，留意最要紧、最清楚的可见内容";
@@ -135,15 +136,23 @@ function MainApp() {
   const [runtime, setRuntime] = useState(initialRuntime);
   const [error, setError] = useState("");
   const [view, setView] = useState<MainView>("home");
+  /** 1.1: 最近一次识别结果的表情提示，传给 EmotionBall。 */
+  const [hint, setHint] = useState<string | null>(null);
   const active = runtime.phase === "recognizing";
   const currentWindow = getCurrentWindow();
 
   useEffect(() => {
     void bridge.runtime().then(setRuntime).catch(() => setError("无法连接本地运行时"));
-    const timer = window.setInterval(() => {
-      void bridge.runtime().then(setRuntime).catch(() => undefined);
-    }, 800);
-    let cleanup: (() => void) | undefined;
+    // 2.1: 订阅推送代替 800ms 轮询；初始快照仍主动拉一次。
+    let unlistenRuntime: (() => void) | undefined;
+    let unlistenRecognition: (() => void) | undefined;
+    void bridge
+      .onRuntime((snapshot) => {
+        setRuntime((current) => ({ ...current, ...snapshot }));
+      })
+      .then((unlisten) => {
+        unlistenRuntime = unlisten;
+      });
     void bridge
       .onRecognition((event) => {
         setRuntime((current) => ({
@@ -152,13 +161,14 @@ function MainApp() {
           phase: event.phase,
           taskId: event.taskId || current.taskId,
         }));
+        setHint(event.emotionHint ?? null);
       })
       .then((unlisten) => {
-        cleanup = unlisten;
+        unlistenRecognition = unlisten;
       });
     return () => {
-      window.clearInterval(timer);
-      cleanup?.();
+      unlistenRuntime?.();
+      unlistenRecognition?.();
     };
   }, []);
 
@@ -167,6 +177,7 @@ function MainApp() {
       ({
         idle: "待命",
         recognizing: "识别中",
+        paused: "已暂停",
         stopped: "已停止",
         error: "需要处理",
       }[runtime.phase] ?? runtime.phase),
@@ -243,7 +254,7 @@ function MainApp() {
         <ModelSettingsPage modelReady={runtime.modelReady} onBack={() => setView("home")} />
       ) : (
         <section className="launch-pane">
-          <BotStage active={active} phase={runtime.phase} status={phaseLabel} detail={runtime.message} />
+          <BotStage active={active} phase={runtime.phase} status={phaseLabel} detail={runtime.message} hint={hint} />
           <ModelLoadStatus runtime={runtime} />
 
           <div className="launch-actions">
@@ -603,6 +614,10 @@ function ModelSettingsPage({ modelReady, onBack }: { modelReady: boolean; onBack
 
 const WAITING_TEXT = "我先看一眼现在的屏幕…";
 
+/** 1.2: 右键菜单临时撑大的窗口尺寸（resize 保留右下角锚点，精灵不会跳位）。 */
+const MENU_WIDTH = 188;
+const MENU_HEIGHT = 232;
+
 function isWaitingSpeech(text: string) {
   const value = text.trim();
   return (
@@ -616,6 +631,7 @@ function isWaitingSpeech(text: string) {
 function floatingStatusLabel(phase: Phase, active: boolean) {
   if (phase === "error") return "需要处理";
   if (phase === "stopped") return "已暂停";
+  if (phase === "paused") return "小憩中";
   if (active || phase === "recognizing") return "观察中";
   return "等待中";
 }
@@ -666,12 +682,25 @@ function FloatingApp() {
     updatedAt: "",
   });
   const [active, setActive] = useState(false);
+  /** 2.4: 识别循环是否处于暂停（仅用于右键菜单可用性）。 */
+  const [paused, setPaused] = useState(false);
+  /** 1.2: 自绘右键菜单。 */
+  const [menuOpen, setMenuOpen] = useState(false);
+  /** 1.1: 最近一次表情提示。 */
+  const [hint, setHint] = useState<string | null>(null);
+  const ballRef = useRef<EmotionBallHandle>(null);
   const messageBodyRef = useRef<HTMLParagraphElement>(null);
   const shellRef = useRef<HTMLElement>(null);
   const lastSizeRef = useRef({ width: 0, height: 0 });
   const scheduleSizeRef = useRef<(force?: boolean) => void>(() => undefined);
   const hasLiveEventRef = useRef(false);
   const currentWindow = getCurrentWindow();
+
+  // 1.2: 精灵的单击/双击/拖拽判定。拖拽交给原生 startDragging；
+  // 单击延迟唤起主窗口，双击取消单击并触发“立刻看一眼”。
+  const pointerRef = useRef({ pointerId: -1, x: 0, y: 0, moved: false });
+  const clickTimerRef = useRef(0);
+  const lastClickAtRef = useRef(0);
 
   useEffect(() => {
     const messageBody = messageBodyRef.current;
@@ -687,10 +716,16 @@ function FloatingApp() {
 
     let cleanupFloating: (() => void) | undefined;
     let cleanupRecognition: (() => void) | undefined;
+    let cleanupRuntime: (() => void) | undefined;
+    let cleanupVisibility: (() => void) | undefined;
+
+    // 2.1: 订阅推送代替 800ms 轮询；初始快照仍主动拉一次，
+    // 在首个 live 事件到达前兼作慢监听器兑底。
     const syncRuntimePhase = () => {
       void bridge.runtime().then((runtime) => {
         if (hasLiveEventRef.current) return;
         setActive(runtime.phase === "recognizing");
+        setPaused(!!runtime.paused);
         const runtimeText = isWaitingSpeech(runtime.message) ? "" : runtime.message;
         setMessage((current) => {
           if (current.phase === runtime.phase && current.text === runtimeText) return current;
@@ -698,10 +733,13 @@ function FloatingApp() {
         });
       });
     };
+
     void bridge
       .onFloating((payload) => {
         hasLiveEventRef.current = true;
         setActive(payload.phase === "recognizing");
+        setPaused(payload.phase === "paused");
+        setHint(payload.emotionHint ?? null);
         setMessage({
           ...payload,
           text: isWaitingSpeech(payload.text) ? "" : payload.text,
@@ -714,6 +752,8 @@ function FloatingApp() {
       .onRecognition((event) => {
         hasLiveEventRef.current = true;
         setActive(event.phase === "recognizing");
+        setPaused(false);
+        setHint(event.emotionHint ?? null);
         setMessage({
           text: isWaitingSpeech(event.detail) ? "" : event.detail,
           phase: event.phase,
@@ -723,15 +763,43 @@ function FloatingApp() {
       .then((unlisten) => {
         cleanupRecognition = unlisten;
       });
-    // The floating window is created once and can remain hidden between
-    // sessions. Poll until the first live event so a slow webview listener
-    // cannot miss the initial recognizing phase.
+    void bridge
+      .onRuntime((runtime) => {
+        if (hasLiveEventRef.current) return;
+        setActive(runtime.phase === "recognizing");
+        setPaused(!!runtime.paused);
+        const runtimeText = isWaitingSpeech(runtime.message) ? "" : runtime.message;
+        setMessage((current) => {
+          if (current.phase === runtime.phase && current.text === runtimeText) return current;
+          return { ...current, phase: runtime.phase, text: runtimeText };
+        });
+      })
+      .then((unlisten) => {
+        cleanupRuntime = unlisten;
+      });
     syncRuntimePhase();
-    const runtimeTimer = window.setInterval(syncRuntimePhase, 800);
+
+    // 2.1: 窗口可见性由 Rust 端在 show/hide 时推送，代替 200ms 轮询。
+    void bridge
+      .onFloatingVisibility((visible) => {
+        if (visible) {
+          lastSizeRef.current = { width: 0, height: 0 };
+          scheduleSizeRef.current(true);
+          ballRef.current?.setActive(true);
+        } else {
+          // 隐藏时暂停动画，避免隐藏的 WebView 继续烧帧。
+          ballRef.current?.setActive(false);
+        }
+      })
+      .then((unlisten) => {
+        cleanupVisibility = unlisten;
+      });
+
     return () => {
       cleanupFloating?.();
       cleanupRecognition?.();
-      window.clearInterval(runtimeTimer);
+      cleanupRuntime?.();
+      cleanupVisibility?.();
     };
   }, []);
 
@@ -772,22 +840,10 @@ function FloatingApp() {
     const observer = new ResizeObserver(() => schedule());
     observer.observe(shell);
 
-    let visible = false;
-    const visibilityTimer = window.setInterval(() => {
-      void currentWindow.isVisible().then((next) => {
-        if (next && !visible) {
-          lastSizeRef.current = { width: 0, height: 0 };
-          schedule(true);
-        }
-        visible = next;
-      });
-    }, 200);
-
     return () => {
       scheduleSizeRef.current = () => undefined;
       window.cancelAnimationFrame(frame);
       window.clearTimeout(shrinkTimer);
-      window.clearInterval(visibilityTimer);
       observer.disconnect();
     };
   }, [currentWindow]);
@@ -797,9 +853,79 @@ function FloatingApp() {
     scheduleSizeRef.current(true);
   }, [message.text, message.phase]);
 
+  // 1.2: 菜单打开时窗口可能不够高，临时撑大 HWND；关闭后恢复。
+  useEffect(() => {
+    if (!menuOpen) return;
+    const schedule = scheduleSizeRef.current;
+    void bridge.resizeFloating(MENU_WIDTH, MENU_HEIGHT);
+    const onWindowBlur = () => setMenuOpen(false);
+    window.addEventListener("blur", onWindowBlur);
+    window.addEventListener("click", onWindowBlur);
+    return () => {
+      window.removeEventListener("blur", onWindowBlur);
+      window.removeEventListener("click", onWindowBlur);
+      schedule(true);
+    };
+  }, [menuOpen]);
+
   function dragWindow(event: React.MouseEvent<HTMLElement>) {
-    if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+    if (
+      event.button !== 0 ||
+      (event.target as HTMLElement).closest("button, .floating-pet, .floating-menu")
+    ) {
+      return;
+    }
     void currentWindow.startDragging();
+  }
+
+  function onPetPointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    pointerRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      moved: false,
+    };
+  }
+
+  function onPetPointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    const state = pointerRef.current;
+    if (state.pointerId !== event.pointerId || state.moved) return;
+    if (Math.hypot(event.clientX - state.x, event.clientY - state.y) > 6) {
+      state.moved = true;
+      void currentWindow.startDragging();
+    }
+  }
+
+  function onPetPointerUp(event: React.PointerEvent<HTMLDivElement>) {
+    const state = pointerRef.current;
+    if (state.pointerId !== event.pointerId || state.moved) return;
+    state.pointerId = -1;
+    const now = performance.now();
+    const isDouble = now - lastClickAtRef.current < 320;
+    lastClickAtRef.current = now;
+    window.clearTimeout(clickTimerRef.current);
+    if (isDouble) {
+      // 1.2: 双击精灵 → 立刻看一眼（未运行时重新开始观察）。
+      lastClickAtRef.current = 0;
+      void bridge.companionPeek().catch(() => undefined);
+      return;
+    }
+    // 1.2: 单击精灵 → 唤起主窗口（延迟等双击判定）。
+    clickTimerRef.current = window.setTimeout(() => {
+      void bridge.focusMain();
+    }, 280);
+  }
+
+  function openMenu(event: React.MouseEvent<HTMLElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setMenuOpen(true);
+  }
+
+  function runMenuAction(action: () => Promise<unknown> | void) {
+    setMenuOpen(false);
+    void Promise.resolve(action()).catch(() => undefined);
   }
 
   async function closeAndStop() {
@@ -818,6 +944,7 @@ function FloatingApp() {
       className={`floating-shell ${active ? "is-active" : ""}`}
       data-tauri-drag-region
       onMouseDown={dragWindow}
+      onContextMenu={openMenu}
     >
       {message.text ? (
         <div className="floating-speech" role="status" aria-live="polite">
@@ -836,9 +963,88 @@ function FloatingApp() {
         </div>
       ) : null}
 
-      <div className="floating-pet">
-        <EmotionBall phase={message.phase} active={active} size="floating" label="Baodou 悬浮精灵" />
+      <div
+        className="floating-pet is-clickable"
+        onPointerDown={onPetPointerDown}
+        onPointerMove={onPetPointerMove}
+        onPointerUp={onPetPointerUp}
+        role="button"
+        tabIndex={-1}
+        aria-label="Baodou 精灵：单击打开主界面，双击立刻看一眼，右键打开菜单"
+      >
+        <EmotionBall
+          ref={ballRef}
+          phase={message.phase}
+          active={active}
+          hint={hint}
+          size="floating"
+          label="Baodou 悬浮精灵"
+        />
       </div>
+
+      {menuOpen ? (
+        <div
+          className="floating-menu"
+          role="menu"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            role="menuitem"
+            className="floating-menu-item"
+            onClick={() => runMenuAction(() => void bridge.companionPeek())}
+          >
+            👀 立刻看一眼
+          </button>
+          <button
+            role="menuitem"
+            className="floating-menu-item"
+            disabled={paused || !active}
+            onClick={() => runMenuAction(() => bridge.pauseRecognition(10))}
+          >
+            😴 暂停 10 分钟
+          </button>
+          <button
+            role="menuitem"
+            className="floating-menu-item"
+            disabled={paused || !active}
+            onClick={() => runMenuAction(() => bridge.pauseRecognition(60))}
+          >
+            🛌 暂停 1 小时
+          </button>
+          <button
+            role="menuitem"
+            className="floating-menu-item"
+            disabled={!paused}
+            onClick={() => runMenuAction(() => bridge.resumeRecognition())}
+          >
+            ☀️ 恢复观察
+          </button>
+          <button
+            role="menuitem"
+            className="floating-menu-item"
+            onClick={() => runMenuAction(() => void bridge.focusMain())}
+          >
+            🏠 打开主界面
+          </button>
+          <button
+            role="menuitem"
+            className="floating-menu-item floating-menu-item--danger"
+            onClick={() => {
+              setMenuOpen(false);
+              void closeAndStop();
+            }}
+          >
+            ⏹ 关闭并停止
+          </button>
+          <button
+            role="menuitem"
+            className="floating-menu-item floating-menu-item--danger"
+            onClick={() => runMenuAction(() => void bridge.exitApp())}
+          >
+            ✖ 退出 Baodou
+          </button>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -848,11 +1054,13 @@ function BotStage({
   phase,
   status,
   detail,
+  hint,
 }: {
   active: boolean;
   phase: string;
   status: string;
   detail: string;
+  hint?: string | null;
 }) {
   const terminal = phase === "stopped" || phase === "error";
 
@@ -868,7 +1076,7 @@ function BotStage({
         </div>
       </div>
       <p className="computer-use-detail">{detail}</p>
-      <EmotionBall phase={phase} active={active} size="stage" label={`Baodou ${status}`} />
+      <EmotionBall phase={phase} active={active} hint={hint} size="stage" label={`Baodou ${status}`} />
     </div>
   );
 }

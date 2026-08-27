@@ -12,7 +12,10 @@ use std::{
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Child, ChildStderr, Command, Stdio},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 use tauri::{
@@ -63,6 +66,11 @@ const TRAY_EXIT_ID: &str = "quit";
 
 struct RuntimeState {
     snapshot: Mutex<RuntimeSnapshot>,
+    /// 1.2 / 2.4: 悬浮窗“暂停 N 分钟”的截止时刻；None = 未暂停。
+    /// 循环保留采样器与缓存，只跳过识别工作，恢复后不强制全帧重识别。
+    paused_until: Mutex<Option<Instant>>,
+    /// 1.2: 悬浮窗“立刻看一眼”请求，绕过采样间隔，由识别循环消费。
+    peek: AtomicBool,
 }
 struct ModelState {
     process: Mutex<Option<Child>>,
@@ -71,6 +79,8 @@ impl Default for RuntimeState {
     fn default() -> Self {
         Self {
             snapshot: Mutex::new(RuntimeSnapshot::default()),
+            paused_until: Mutex::new(None),
+            peek: AtomicBool::new(false),
         }
     }
 }
@@ -175,6 +185,36 @@ fn normalize_model_config(mut config: ModelConfig) -> ModelConfig {
 }
 
 #[cfg(test)]
+mod emotion_hint_tests {
+    use super::classify_emotion_hint;
+
+    #[test]
+    fn maps_phase_directly() {
+        assert_eq!(classify_emotion_hint("任意文本", "error"), "error");
+        assert_eq!(classify_emotion_hint("好，我先歇一会儿。", "stopped"), "rest");
+        assert_eq!(classify_emotion_hint("我先眯 10 分钟。", "paused"), "rest");
+    }
+
+    #[test]
+    fn classifies_semantic_categories() {
+        assert_eq!(
+            classify_emotion_hint("我看到一个报错弹窗：更新失败。", "recognizing"),
+            "alert"
+        );
+        assert_eq!(classify_emotion_hint("群里收到了新消息。", "recognizing"), "message");
+        assert_eq!(
+            classify_emotion_hint("下载进度已经到 80%。", "recognizing"),
+            "progress"
+        );
+        assert_eq!(
+            classify_emotion_hint("画面内容存在变化，但关键文字暂无法稳定确认。", "recognizing"),
+            "unclear"
+        );
+        assert_eq!(classify_emotion_hint("屏幕上是一个代码编辑器。", "recognizing"), "neutral");
+    }
+}
+
+#[cfg(test)]
 mod model_status_tests {
     use super::{extract_log_percent, model_log_update, normalize_user_path};
 
@@ -247,6 +287,9 @@ struct RuntimeSnapshot {
     task_id: Option<String>,
     goal: Option<String>,
     message: String,
+    /// 2.4: 识别循环处于“暂停 N 分钟”状态（phase 仍为 recognizing）。
+    #[serde(default)]
+    paused: bool,
     /// Live counters for benchmark / acceptance runs.
     rounds: u64,
     skipped_rounds: u64,
@@ -297,6 +340,7 @@ impl Default for RuntimeSnapshot {
             task_id: None,
             goal: None,
             message: "我在桌边呢，随时可以帮你看屏幕。".into(),
+            paused: false,
             rounds: 0,
             skipped_rounds: 0,
             requests: 0,
@@ -322,6 +366,9 @@ struct RecognitionEvent {
     requires_confirmation: bool,
     complete: bool,
     ok: bool,
+    /// 1.1: 轻量语义分类，驱动 EmotionBall 表情/动作（alert/message/…）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    emotion_hint: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -330,6 +377,9 @@ struct FloatingMessage {
     text: String,
     phase: String,
     updated_at: String,
+    /// 1.1: 表情提示，前端映射到 EmotionBall 的具体表情/动作。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    emotion_hint: Option<String>,
 }
 
 /// Result of one recognition round, alongside its streamed timing breakdown.
@@ -633,17 +683,105 @@ fn update_snapshot(
     snapshot.clone()
 }
 
+/// 2.1: snapshot 变化后立即向两个窗口广播 `runtime-changed`，
+/// 前端只在收到事件时 setState，替代 800ms 轮询。
+/// 纯计数器（rounds/skipped）等高频低价值更新仍走不带广播的 `update_snapshot`。
+fn update_snapshot_emit(
+    app: &AppHandle,
+    state: &RuntimeState,
+    update: impl FnOnce(&mut RuntimeSnapshot),
+) -> RuntimeSnapshot {
+    let snapshot = update_snapshot(state, update);
+    let _ = app.emit("runtime-changed", &snapshot);
+    snapshot
+}
+
+/// 1.1: 轻量语义分类。不额外请求模型，只对即将播报的文本做关键词匹配，
+/// 生成 EmotionBall 的表情提示。返回值与前端 `HINT_EMOTION` 约定一一对应。
+fn classify_emotion_hint(text: &str, phase: &str) -> &'static str {
+    match phase {
+        "error" => return "error",
+        "stopped" | "paused" => return "rest",
+        _ => {}
+    }
+
+    const UNCLEAR: &[&str] = &[
+        "看不清",
+        "无法确认",
+        "无法稳定确认",
+        "模糊",
+        "不宜判断",
+    ];
+    const ALERT: &[&str] = &[
+        "错误",
+        "失败",
+        "报错",
+        "异常",
+        "警告",
+        "无法连接",
+        "崩溃",
+        "已停止响应",
+    ];
+    const MESSAGE: &[&str] = &[
+        "新消息",
+        "收到",
+        "通知",
+        "弹窗",
+        "私信",
+        "来信",
+    ];
+    const PROGRESS: &[&str] = &[
+        "进度",
+        "正在加载",
+        "正在下载",
+        "正在安装",
+        "正在更新",
+        "正在编译",
+        "正在同步",
+        "%",
+    ];
+
+    if UNCLEAR.iter().any(|key| text.contains(key)) {
+        return "unclear";
+    }
+    if ALERT.iter().any(|key| text.contains(key)) {
+        return "alert";
+    }
+    if MESSAGE.iter().any(|key| text.contains(key)) {
+        return "message";
+    }
+    if PROGRESS.iter().any(|key| text.contains(key)) {
+        return "progress";
+    }
+    "neutral"
+}
+
 fn emit_recognition(app: &AppHandle, event: RecognitionEvent) {
     let _ = app.emit("recognition-event", event);
 }
 
 fn emit_floating(app: &AppHandle, text: impl Into<String>, phase: impl Into<String>) {
+    let text = text.into();
+    let phase = phase.into();
+    let hint = classify_emotion_hint(&text, &phase);
+    emit_floating_hinted(app, text, phase, Some(hint.to_string()));
+}
+
+/// 1.1: 带表情提示的播报。流式中间增量（尚未成形的关键词）传 None，
+/// 避免半句文本误触发表情。
+fn emit_floating_hinted(
+    app: &AppHandle,
+    text: impl Into<String>,
+    phase: impl Into<String>,
+    hint: Option<String>,
+) {
     let _ = app.emit(
         "floating-message",
         FloatingMessage {
             text: text.into(),
             phase: phase.into(),
             updated_at: now(),
+            emotion_hint: hint,
         },
     );
 }
@@ -842,7 +980,7 @@ fn set_model_status(
     detail: impl Into<String>,
 ) {
     let detail = detail.into();
-    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+    update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
         snapshot.model_status = status.into();
         snapshot.model_progress = progress.map(|value| value.clamp(0.0, 100.0));
         snapshot.model_detail = detail.clone();
@@ -927,7 +1065,7 @@ fn spawn_model_log_reader(app: &AppHandle, stderr: ChildStderr) {
 }
 
 fn mark_model_ready(app: &AppHandle, message: &str) {
-    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+    update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
         snapshot.model_ready = true;
         snapshot.model_status = "ready".into();
         snapshot.model_progress = Some(100.0);
@@ -938,7 +1076,7 @@ fn mark_model_ready(app: &AppHandle, message: &str) {
 
 fn mark_model_not_ready(app: &AppHandle, message: impl Into<String>) {
     let message = message.into();
-    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+    update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
         snapshot.model_ready = false;
         snapshot.model_status = "error".into();
         snapshot.model_progress = None;
@@ -949,7 +1087,7 @@ fn mark_model_not_ready(app: &AppHandle, message: impl Into<String>) {
 
 fn mark_model_unconfigured(app: &AppHandle, message: impl Into<String>) {
     let message = message.into();
-    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+    update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
         snapshot.model_ready = false;
         snapshot.model_status = "unconfigured".into();
         snapshot.model_progress = None;
@@ -1018,7 +1156,7 @@ fn start_model(app: AppHandle) {
             progress.or(Some(0.0)),
             "正在等待推理服务就绪…",
         );
-        update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+        update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
             snapshot.model_ready = false;
             snapshot.message = "正在等待本地视觉模型就绪…".into();
         });
@@ -1072,7 +1210,7 @@ fn start_model(app: AppHandle) {
     let host = parts.next().unwrap_or("127.0.0.1");
 
     set_model_status(&app, "starting", Some(0.0), "正在启动推理服务…");
-    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+    update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
         snapshot.model_ready = false;
         snapshot.message = "正在启动本地视觉模型…".into();
     });
@@ -1181,7 +1319,7 @@ fn supervise_model(app: AppHandle) {
             continue;
         }
 
-        update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+        update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
             if snapshot.model_ready {
                 snapshot.model_ready = false;
                 snapshot.model_status = "reconnecting".into();
@@ -1259,7 +1397,7 @@ fn poll_server_metrics(app: AppHandle) {
         let Some(summary) = server_metrics(&endpoint) else {
             continue;
         };
-        update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+        update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
             let metrics = snapshot.metrics.get_or_insert_default();
             metrics.server = Some(summary);
         });
@@ -1468,6 +1606,13 @@ fn recognize(
         .ok_or_else(|| "模型已收到屏幕截图，但没有生成识别内容".to_string())
 }
 
+/// 2.4: 暂停是否仍在生效（不消费到期时间，供播报抑制使用）。
+fn pause_active(app: &AppHandle) -> bool {
+    let state = app.state::<RuntimeState>();
+    let guard = state.paused_until.lock().expect("paused poisoned");
+    matches!(*guard, Some(until) if Instant::now() < until)
+}
+
 fn task_active(app: &AppHandle, id: &str) -> bool {
     let snapshot = app
         .state::<RuntimeState>()
@@ -1542,12 +1687,13 @@ fn run_task(
         )
         .map_err(|e| format!("无法保存会话：{e}"))?;
 
-    update_snapshot(&state, |snapshot| {
+    update_snapshot_emit(&app, &state, |snapshot| {
         snapshot.mode = "live screen recognition".into();
         snapshot.phase = "recognizing".into();
         snapshot.task_id = Some(id.clone());
         snapshot.goal = Some(goal.clone());
         snapshot.message = "我先看一眼现在的屏幕…".into();
+        snapshot.paused = false;
     });
     // Publish the phase before the background capture warm-up starts. The
     // floating webview already exists (hidden), so both surfaces can switch
@@ -1566,7 +1712,7 @@ fn run_task(
         let capture_hwnds = match app_capture_hwnds(&clone) {
             Ok(hwnds) => hwnds,
             Err(error) => {
-                update_snapshot(&clone.state::<RuntimeState>(), |snapshot| {
+                update_snapshot_emit(&clone, &clone.state::<RuntimeState>(), |snapshot| {
                     snapshot.phase = "error".into();
                     snapshot.message = error.clone();
                 });
@@ -1580,7 +1726,7 @@ fn run_task(
         // fail-closed, per-frame exclusion instead of sending a raw frame.
         let backdrop = capture::DesktopBackdrop::capture_excluding(&capture_hwnds).ok();
         if let Err(error) = show_floating_window(clone.clone()) {
-            update_snapshot(&clone.state::<RuntimeState>(), |snapshot| {
+            update_snapshot_emit(&clone, &clone.state::<RuntimeState>(), |snapshot| {
                 snapshot.message = error.clone();
             });
             emit_floating(&clone, format!("无法显示悬浮窗：{error}"), "error");
@@ -1628,6 +1774,7 @@ fn wait_until(started: Instant, target: Duration) {
 }
 
 fn count_round(app: &AppHandle) {
+    // 纯计数：不广播 runtime-changed，避免每帧空转推送。
     update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
         snapshot.rounds = snapshot.rounds.saturating_add(1);
     });
@@ -1664,7 +1811,7 @@ fn readability_label(kind: textsim::Readability) -> &'static str {
 }
 
 fn record_metrics(app: &AppHandle, mut metrics: OpsMetrics) {
-    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+    update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
         let previous_server = snapshot.metrics.as_ref().and_then(|m| m.server.clone());
         metrics.server = previous_server;
         snapshot.metrics = Some(metrics.clone());
@@ -1698,11 +1845,37 @@ fn recognition_loop(
     while task_active(&app, &task_id) {
         let frame_started = Instant::now();
 
+        // 2.4: 暂停期间保循环、采样器与缓存，只跳过识别工作。
+        let paused = {
+            let runtime_state = app.state::<RuntimeState>();
+            let mut guard = runtime_state
+                .paused_until
+                .lock()
+                .expect("paused poisoned");
+            match *guard {
+                Some(until) if Instant::now() < until => true,
+                Some(_) => {
+                    *guard = None;
+                    update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
+                        snapshot.paused = false;
+                        snapshot.message = "休息结束，我继续看啦～".into();
+                    });
+                    emit_floating(&app, "休息结束，我继续看啦～", "recognizing");
+                    false
+                }
+                None => false,
+            }
+        };
+        if paused {
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        }
+
         let capture_started = Instant::now();
         let captured = match capture_primary_excluding(&capture_hwnds, backdrop.as_mut()) {
             Ok(frame) => frame,
             Err(error) => {
-                update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+                update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
                     snapshot.message = error.clone();
                 });
                 emit_floating(&app, format!("识别暂不可用：{error}"), "error");
@@ -1800,9 +1973,19 @@ fn recognition_loop(
             Motion::Idle => {}
         }
 
+        // 1.2: 悬浮窗双击“立刻看一眼”：绕过采样间隔与抑制窗口，全帧识别。
+        let peek_requested = app
+            .state::<RuntimeState>()
+            .peek
+            .swap(false, Ordering::Relaxed);
+
         // Localised change → high-density crop; global change → full screen.
         if send && !is_first && area <= CROP_MAX_AREA_FRACTION {
             crop_rect = bbox;
+        }
+        if peek_requested {
+            send = true;
+            crop_rect = None;
         }
 
         if !send {
@@ -1836,8 +2019,10 @@ fn recognition_loop(
         let app_for_delta = app.clone();
         let task_for_delta = task_id.clone();
         let result = recognize(&endpoint, &goal, &input, move |text| {
-            if task_active(&app_for_delta, &task_for_delta) {
-                emit_floating(&app_for_delta, text, "recognizing");
+            // 2.4: 暂停期间连流式增量也一并抑制，保持“小憩中”不被覆盖。
+            if task_active(&app_for_delta, &task_for_delta) && !pause_active(&app_for_delta) {
+                // 流式中间增量：不携带表情提示，避免半句文本误触发表情。
+                emit_floating_hinted(&app_for_delta, text, "recognizing", None);
             }
         });
 
@@ -1847,17 +2032,21 @@ fn recognition_loop(
                 sampler.note_success();
                 let readability = textsim::classify_readability(&result.text);
                 let low_info = textsim::is_low_information(&result.text);
+                // 2.4: 暂停期间到达的结果只更新缓存，不播报，避免覆盖“小憩中”。
+                let paused_now = pause_active(&app);
 
                 let contradicted = !last_text.is_empty()
                     && round_time >= contradiction_suppress_until
                     && textsim::contradicts(&last_text, &result.text);
-                if contradicted {
+                if paused_now {
+                    last_text = result.text;
+                } else if contradicted {
                     // Consecutive results disagree: be conservative instead of
                     // printing an apparently-firm but unstable fact.
                     contradiction_suppress_until = round_time + CONTRADICTION_COOLDOWN;
                     let conservative = "画面内容存在变化，但关键文字暂无法稳定确认。";
                     emit_floating(&app, conservative, "recognizing");
-                    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
+                    update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
                         snapshot.model_ready = true;
                         snapshot.message = conservative.into();
                     });
@@ -1865,26 +2054,42 @@ fn recognition_loop(
                     last_text = result.text;
                 } else if textsim::should_refresh(&last_text, &result.text) {
                     let timestamp = now();
-                    update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
-                        snapshot.model_ready = true;
-                        snapshot.message = result.text.clone();
-                    });
                     persist_latest_result(&task_id, &result.text);
-                    emit_recognition(
-                        &app,
-                        RecognitionEvent {
-                            task_id: task_id.clone(),
-                            phase: "recognizing".into(),
-                            title: "屏幕识别结果".into(),
-                            detail: result.text.clone(),
-                            timestamp,
-                            requires_confirmation: false,
-                            complete: false,
-                            ok: true,
-                        },
-                    );
-                    emit_floating(&app, result.text.clone(), "recognizing");
-                    last_text = result.text;
+                    if paused_now {
+                        last_text = result.text;
+                    } else {
+                        update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
+                            snapshot.model_ready = true;
+                            snapshot.message = result.text.clone();
+                        });
+                        // 1.1: 高动态画面（视频/滚动）切“专注”，否则按文本语义分类。
+                        let hint = if matches!(motion, sampling::Motion::HighActivity) {
+                            "focused"
+                        } else {
+                            classify_emotion_hint(&result.text, "recognizing")
+                        };
+                        emit_recognition(
+                            &app,
+                            RecognitionEvent {
+                                task_id: task_id.clone(),
+                                phase: "recognizing".into(),
+                                title: "屏幕识别结果".into(),
+                                detail: result.text.clone(),
+                                timestamp,
+                                requires_confirmation: false,
+                                complete: false,
+                                ok: true,
+                                emotion_hint: Some(hint.to_string()),
+                            },
+                        );
+                        emit_floating_hinted(
+                            &app,
+                            result.text.clone(),
+                            "recognizing",
+                            Some(hint.to_string()),
+                        );
+                        last_text = result.text;
+                    }
                 }
 
                 if low_info {
@@ -1919,10 +2124,12 @@ fn recognition_loop(
                 // Service / parse errors are clearly separated from visual
                 // uncertainty by the message itself and by the error metric.
                 sampler.note_error();
-                update_snapshot(&app.state::<RuntimeState>(), |snapshot| {
-                    snapshot.message = error.clone();
-                });
-                emit_floating(&app, format!("识别暂不可用：{error}"), "error");
+                if !pause_active(&app) {
+                    update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
+                        snapshot.message = error.clone();
+                    });
+                    emit_floating(&app, format!("识别暂不可用：{error}"), "error");
+                }
                 record_metrics(
                     &app,
                     OpsMetrics {
@@ -1953,8 +2160,12 @@ fn recognition_loop(
 
 #[tauri::command]
 fn stop_runtime(app: AppHandle, state: State<'_, RuntimeState>) -> RuntimeSnapshot {
-    let snapshot = update_snapshot(&state, |s| {
+    // 停止时同时清理暂停状态与“看一眼”请求。
+    *state.paused_until.lock().expect("paused poisoned") = None;
+    state.peek.store(false, Ordering::Relaxed);
+    let snapshot = update_snapshot_emit(&app, &state, |s| {
         s.phase = "stopped".into();
+        s.paused = false;
         s.message = "好，我先不看了。".into();
     });
     emit_floating(&app, "好，我先歇一会儿。", "stopped");
@@ -1965,6 +2176,87 @@ fn stop_runtime(app: AppHandle, state: State<'_, RuntimeState>) -> RuntimeSnapsh
 #[tauri::command]
 fn pause_runtime(app: AppHandle, state: State<'_, RuntimeState>) -> RuntimeSnapshot {
     stop_runtime(app, state)
+}
+
+/// 1.2 / 2.4: 真正的“暂停 N 分钟”：循环与缓存保留，窗口不隐藏，到期自动恢复。
+#[tauri::command]
+fn pause_recognition(
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
+    minutes: Option<i64>,
+) -> Result<RuntimeSnapshot, String> {
+    let minutes = minutes.unwrap_or(10).clamp(1, 24 * 60) as u64;
+    let (phase, already_paused) = {
+        let snapshot = state.snapshot.lock().expect("runtime poisoned");
+        (snapshot.phase.clone(), snapshot.paused)
+    };
+    if phase != "recognizing" || already_paused {
+        return Ok(state.snapshot.lock().expect("runtime poisoned").clone());
+    }
+
+    *state.paused_until.lock().expect("paused poisoned") =
+        Some(Instant::now() + Duration::from_secs(minutes * 60));
+    state.peek.store(false, Ordering::Relaxed);
+    let snapshot = update_snapshot_emit(&app, &state, |s| {
+        s.paused = true;
+        s.message = format!("我先眯 {minutes} 分钟，休息结束自己回来～");
+    });
+    emit_floating(&app, format!("好，我先眯 {minutes} 分钟。"), "paused");
+    Ok(snapshot)
+}
+
+/// 1.2 / 2.4: 手动恢复观察（暂停期提前结束）。
+#[tauri::command]
+fn resume_recognition(app: AppHandle, state: State<'_, RuntimeState>) -> RuntimeSnapshot {
+    let was_paused = state.paused_until.lock().expect("paused poisoned").take().is_some();
+    if !was_paused {
+        return state.snapshot.lock().expect("runtime poisoned").clone();
+    }
+    let snapshot = update_snapshot_emit(&app, &state, |s| {
+        s.paused = false;
+        s.message = "我继续看啦～".into();
+    });
+    emit_floating(&app, "我继续看啦～", "recognizing");
+    snapshot
+}
+
+/// 1.2: 悬浮窗双击“立刻看一眼”。识别中 → 绕过采样间隔；
+/// 未运行时 → 用上次的关注点重新开始观察。
+#[tauri::command]
+fn companion_peek(app: AppHandle, state: State<'_, RuntimeState>) -> Result<String, String> {
+    let (phase, paused, goal) = {
+        let snapshot = state.snapshot.lock().expect("runtime poisoned");
+        (snapshot.phase.clone(), snapshot.paused, snapshot.goal.clone())
+    };
+
+    if phase == "recognizing" {
+        if paused {
+            // 暂停中的“看一眼”：先解除暂停，再触发一次全帧识别。
+            *state.paused_until.lock().expect("paused poisoned") = None;
+            update_snapshot_emit(&app, &state, |s| {
+                s.paused = false;
+                s.message = "让我仔细看一眼…".into();
+            });
+            emit_floating(&app, "让我仔细看一眼…", "recognizing");
+        }
+        state.peek.store(true, Ordering::Relaxed);
+        Ok("peek".into())
+    } else {
+        run_task(app, state, TaskRequest { goal })
+    }
+}
+
+/// 1.2: 左键单击精灵唤起主窗口（主窗口 hide 后不必再从托盘找回）。
+#[tauri::command]
+fn focus_main_window(app: AppHandle) {
+    show_main_window(&app);
+}
+
+/// 1.2: 右键菜单“退出 Baodou”。
+#[tauri::command]
+fn exit_app(app: AppHandle) {
+    stop_model(&app);
+    app.exit(0);
 }
 
 fn app_capture_hwnds(app: &AppHandle) -> Result<Vec<isize>, String> {
@@ -2073,6 +2365,8 @@ fn show_floating_window(app: AppHandle) -> Result<(), String> {
     window.show().map_err(|e| format!("显示悬浮窗失败：{e}"))?;
     // Keep the overlay above other windows without aggressively stealing keyboard focus.
     let _ = window.unminimize();
+    // 2.1: 用事件通知悬浮窗自身可见性，替代前端 200ms 轮询 isVisible。
+    let _ = app.emit_to(FLOATING_LABEL, "floating-visibility", true);
     Ok(())
 }
 
@@ -2135,6 +2429,8 @@ fn hide_floating_window(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(FLOATING_LABEL) {
         window.hide().map_err(|e| format!("隐藏悬浮窗失败：{e}"))?;
     }
+    // 2.1: 隐藏时通知悬浮窗暂停动画与尺寸同步。
+    let _ = app.emit_to(FLOATING_LABEL, "floating-visibility", false);
     Ok(())
 }
 
@@ -2222,7 +2518,12 @@ pub fn run() {
             stop_runtime,
             show_floating_window,
             hide_floating_window,
-            resize_floating_window
+            resize_floating_window,
+            pause_recognition,
+            resume_recognition,
+            companion_peek,
+            focus_main_window,
+            exit_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running baodou desktop");
