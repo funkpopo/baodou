@@ -99,6 +99,10 @@ struct ModelConfig {
     model_path: String,
     mmproj_path: String,
     llama_url: String,
+    /// Bearer token sent to OpenAI-compatible endpoints. Required for remote
+    /// (non-loopback) addresses; llama-server on loopback usually omits it.
+    #[serde(default)]
+    api_key: String,
     /// P3 server tuning knobs. They never touch the context length `-c`:
     /// only offload, batch, thread and Flash Attention parameters.
     #[serde(default)]
@@ -133,6 +137,7 @@ impl Default for ModelConfig {
             model_path: env::var("BAODOU_MODEL_PATH").unwrap_or_default(),
             mmproj_path: env::var("BAODOU_MMPROJ_PATH").unwrap_or_default(),
             llama_url: env::var("BAODOU_LLAMA_URL").unwrap_or_default(),
+            api_key: env::var("BAODOU_API_KEY").unwrap_or_default(),
             n_gpu_layers: env_i32("BAODOU_N_GPU_LAYERS"),
             batch_size: env_i32("BAODOU_BATCH_SIZE"),
             ubatch_size: env_i32("BAODOU_UBATCH_SIZE"),
@@ -181,6 +186,7 @@ fn normalize_model_config(mut config: ModelConfig) -> ModelConfig {
     config.model_path = normalize_user_path(&config.model_path);
     config.mmproj_path = normalize_user_path(&config.mmproj_path);
     config.llama_url = config.llama_url.trim().to_owned();
+    config.api_key = config.api_key.trim().to_owned();
     config
 }
 
@@ -644,7 +650,7 @@ mod response_tests {
         std::env::set_var("https_proxy", "http://127.0.0.1:9");
 
         let endpoint = format!("http://{addr}/v1/chat/completions");
-        let ready = super::llama_health(&endpoint);
+        let ready = super::llama_health(&endpoint, "");
 
         for (key, value) in previous {
             match value {
@@ -889,12 +895,19 @@ fn set_model_config(app: AppHandle, config: ModelConfig) -> Result<ModelConfig, 
     {
         return Err("模型程序、模型文件、MMPROJ 和接口 URL 都不能为空".into());
     }
+    // Remote OpenAI-compatible services almost always authenticate via a
+    // bearer key; loopback llama-server does not. Enforce the key only for
+    // non-loopback addresses so local setups stay zero-friction.
+    if !is_loopback_endpoint(&config.llama_url) && config.api_key.trim().is_empty() {
+        return Err("远程接口地址需要填写 API Key".into());
+    }
 
     let config = normalize_model_config(ModelConfig {
         server_path: config.server_path,
         model_path: config.model_path,
         mmproj_path: config.mmproj_path,
         llama_url: config.llama_url,
+        api_key: config.api_key,
         n_gpu_layers: config.n_gpu_layers,
         batch_size: config.batch_size,
         ubatch_size: config.ubatch_size,
@@ -922,7 +935,6 @@ fn stop_model(app: &AppHandle) {
     }
 }
 
-#[cfg(test)]
 fn is_loopback_endpoint(endpoint: &str) -> bool {
     let host_port = endpoint
         .split("://")
@@ -960,13 +972,17 @@ fn llama_health_url(endpoint: &str) -> Option<String> {
         .map(|base| format!("{base}/health"))
 }
 
-fn llama_health(endpoint: &str) -> bool {
+fn llama_health(endpoint: &str, api_key: &str) -> bool {
     let Some(url) = llama_health_url(endpoint) else {
         return false;
     };
-    model_http_client()
+    let mut request = model_http_client()
         .get(url)
-        .timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(2));
+    if !api_key.is_empty() {
+        request = request.bearer_auth(api_key);
+    }
+    request
         .send()
         .ok()
         .map(|response| response.status().is_success())
@@ -1120,9 +1136,9 @@ fn prepare_model(app: &AppHandle, _endpoint: &str, ready_message: &str) -> bool 
     true
 }
 
-fn wait_for_model(app: &AppHandle, endpoint: &str, attempts: u32) -> bool {
+fn wait_for_model(app: &AppHandle, endpoint: &str, api_key: &str, attempts: u32) -> bool {
     for _ in 0..attempts {
-        if llama_health(endpoint) {
+        if llama_health(endpoint, api_key) {
             return prepare_model(app, endpoint, "本地视觉模型已就绪");
         }
         // A malformed argument list or a missing runtime DLL can make
@@ -1138,7 +1154,7 @@ fn wait_for_model(app: &AppHandle, endpoint: &str, attempts: u32) -> bool {
 
 fn start_model(app: AppHandle) {
     let config = load_model_config();
-    if llama_health(&config.llama_url) {
+    if llama_health(&config.llama_url, &config.api_key) {
         prepare_model(&app, &config.llama_url, "本地视觉模型已连接");
         return;
     }
@@ -1160,7 +1176,7 @@ fn start_model(app: AppHandle) {
             snapshot.model_ready = false;
             snapshot.message = "正在等待本地视觉模型就绪…".into();
         });
-        if !wait_for_model(&app, &config.llama_url, 90) && model_process_alive(&app) {
+        if !wait_for_model(&app, &config.llama_url, &config.api_key, 90) && model_process_alive(&app) {
             mark_model_not_ready(&app, "本地模型启动超时：推理服务未在预期时间内就绪");
         }
         return;
@@ -1281,7 +1297,7 @@ fn start_model(app: AppHandle) {
                 .process
                 .lock()
                 .expect("model poisoned") = Some(child);
-            if !wait_for_model(&app, &config.llama_url, 90) {
+            if !wait_for_model(&app, &config.llama_url, &config.api_key, 90) {
                 if model_process_alive(&app) {
                     mark_model_not_ready(&app, "本地模型启动超时：推理服务未在预期时间内就绪");
                 } else {
@@ -1306,7 +1322,7 @@ fn supervise_model(app: AppHandle) {
     loop {
         std::thread::sleep(Duration::from_secs(2));
         let config = load_model_config();
-        if llama_health(&config.llama_url) {
+        if llama_health(&config.llama_url, &config.api_key) {
             let ready = app
                 .state::<RuntimeState>()
                 .snapshot
@@ -1336,15 +1352,19 @@ fn supervise_model(app: AppHandle) {
 /// counters most useful to the P3 benchmark pass: prompt eval, token eval,
 /// cache hits and KV usage.  Only a short summary is kept in memory; the raw
 /// endpoint name list is deliberately version-tolerant.
-fn server_metrics(endpoint: &str) -> Option<String> {
+fn server_metrics(endpoint: &str, api_key: &str) -> Option<String> {
     let base = endpoint.split("/v1/").next()?;
     if base.is_empty() {
         return None;
     }
     let url = format!("{base}/metrics");
-    let text = model_http_client()
+    let mut request = model_http_client()
         .get(&url)
-        .timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(3));
+    if !api_key.is_empty() {
+        request = request.bearer_auth(api_key);
+    }
+    let text = request
         .send()
         .ok()?
         .error_for_status()
@@ -1390,11 +1410,12 @@ fn server_metrics(endpoint: &str) -> Option<String> {
 fn poll_server_metrics(app: AppHandle) {
     loop {
         std::thread::sleep(Duration::from_secs(3));
-        let endpoint = load_model_config().llama_url;
-        if !llama_health(&endpoint) {
+        let config = load_model_config();
+        let endpoint = config.llama_url;
+        if !llama_health(&endpoint, &config.api_key) {
             continue;
         }
-        let Some(summary) = server_metrics(&endpoint) else {
+        let Some(summary) = server_metrics(&endpoint, &config.api_key) else {
             continue;
         };
         update_snapshot_emit(&app, &app.state::<RuntimeState>(), |snapshot| {
@@ -1493,6 +1514,7 @@ fn recognition_prompt(query: &str) -> String {
 
 fn recognize(
     endpoint: &str,
+    api_key: &str,
     query: &str,
     frame: &ScreenFrame,
     mut on_delta: impl FnMut(&str),
@@ -1524,10 +1546,14 @@ fn recognize(
     });
 
     let send_started = Instant::now();
-    let response = model_http_client()
+    let mut request = model_http_client()
         .post(endpoint)
         .timeout(MODEL_REQUEST_TIMEOUT)
-        .json(&payload)
+        .json(&payload);
+    if !api_key.is_empty() {
+        request = request.bearer_auth(api_key);
+    }
+    let response = request
         .send()
         .map_err(|e| format!("识别请求失败：{e}"))?
         .error_for_status()
@@ -1831,6 +1857,7 @@ fn recognition_loop(
 
     let config = load_model_config();
     let endpoint = config.llama_url;
+    let api_key = config.api_key.clone();
     let multi_image = config.multi_image_input;
 
     let mut sampler = sampling::AdaptiveSampler::default();
@@ -2020,7 +2047,7 @@ fn recognition_loop(
 
         let app_for_delta = app.clone();
         let task_for_delta = task_id.clone();
-        let result = recognize(&endpoint, &goal, &input, move |text| {
+        let result = recognize(&endpoint, &api_key, &goal, &input, move |text| {
             // 2.4: 暂停期间连流式增量也一并抑制，保持“小憩中”不被覆盖。
             if task_active(&app_for_delta, &task_for_delta) && !pause_active(&app_for_delta) {
                 // 流式中间增量：不携带表情提示，避免半句文本误触发表情。

@@ -87,6 +87,8 @@ export interface ModelConfig {
   modelPath: string;
   mmprojPath: string;
   llamaUrl: string;
+  /** 远程接口的鉴权密钥；本地回环地址可留空。 */
+  apiKey: string;
   nGpuLayers?: number | null;
   batchSize?: number | null;
   ubatchSize?: number | null;

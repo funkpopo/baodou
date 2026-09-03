@@ -362,6 +362,12 @@ button:disabled {
   letter-spacing: 0.01em;
 }
 
+.settings-field-required {
+  margin-left: 3px;
+  color: #d7f25a;
+  font-style: normal;
+}
+
 .settings-field input {
   width: 100%;
   height: 35px;

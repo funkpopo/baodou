@@ -48,6 +48,7 @@ interface ModelConfigDraft {
   modelPath: string;
   mmprojPath: string;
   llamaUrl: string;
+  apiKey: string;
   nGpuLayers: string;
   batchSize: string;
   ubatchSize: string;
@@ -61,6 +62,7 @@ const emptyModelConfigDraft: ModelConfigDraft = {
   modelPath: "",
   mmprojPath: "",
   llamaUrl: "",
+  apiKey: "",
   nGpuLayers: "",
   batchSize: "",
   ubatchSize: "",
@@ -75,6 +77,7 @@ function modelConfigToDraft(config: ModelConfig): ModelConfigDraft {
     modelPath: config.modelPath,
     mmprojPath: config.mmprojPath,
     llamaUrl: config.llamaUrl,
+    apiKey: config.apiKey ?? "",
     nGpuLayers: config.nGpuLayers == null ? "" : String(config.nGpuLayers),
     batchSize: config.batchSize == null ? "" : String(config.batchSize),
     ubatchSize: config.ubatchSize == null ? "" : String(config.ubatchSize),
@@ -95,6 +98,7 @@ function draftToModelConfig(draft: ModelConfigDraft): ModelConfig {
     modelPath: draft.modelPath.trim(),
     mmprojPath: draft.mmprojPath.trim(),
     llamaUrl: draft.llamaUrl.trim(),
+    apiKey: draft.apiKey.trim(),
     nGpuLayers: optionalInteger(draft.nGpuLayers),
     batchSize: optionalInteger(draft.batchSize),
     ubatchSize: optionalInteger(draft.ubatchSize),
@@ -106,6 +110,18 @@ function draftToModelConfig(draft: ModelConfigDraft): ModelConfig {
 
 function errorMessage(cause: unknown) {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+/** 回环地址：本地 llama-server 通常无需鉴权。 */
+function isLoopbackUrl(url: string): boolean {
+  const host = url.trim().replace(/^\w+:\/\//, "").split("/")[0] ?? "";
+  return (
+    host.startsWith("127.0.0.1") ||
+    host.startsWith("localhost") ||
+    host.startsWith("0.0.0.0") ||
+    host.startsWith("[::1]") ||
+    host === "::1"
+  );
 }
 
 function resolveWindowMode(): "main" | "floating" {
@@ -374,6 +390,10 @@ function ModelSettingsPage({ modelReady, onBack }: { modelReady: boolean; onBack
     const missing = required.find(([, value]) => !value.trim());
     if (missing) return `${missing[0]}不能为空`;
 
+    if (!isLoopbackUrl(draft.llamaUrl) && !draft.apiKey.trim()) {
+      return "远程接口地址需要填写 API Key";
+    }
+
     const integerFields: Array<[string, string]> = [
       ["GPU 层数", draft.nGpuLayers],
       ["批处理大小", draft.batchSize],
@@ -458,6 +478,26 @@ function ModelSettingsPage({ modelReady, onBack }: { modelReady: boolean; onBack
                 disabled={saving}
               />
               <small>远程地址也可以使用，但本地模型自动启动只适用于本机服务。</small>
+            </label>
+            <label className="settings-field settings-field-wide">
+              <span>
+                API Key
+                {!isLoopbackUrl(draft.llamaUrl) ? <em className="settings-field-required">*</em> : null}
+              </span>
+              <input
+                type="password"
+                value={draft.apiKey}
+                onChange={(event) => updateText("apiKey", event.target.value)}
+                placeholder={isLoopbackUrl(draft.llamaUrl) ? "本地地址可留空" : "远程服务的鉴权密钥（必填）"}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={saving}
+              />
+              <small>
+                {isLoopbackUrl(draft.llamaUrl)
+                  ? "本机地址无需鉴权；llama-server 启用 --api-key 时才需要填写。"
+                  : "远程服务的 Bearer 鉴权密钥，保存后随识别请求一并发送。"}
+              </small>
             </label>
             <label className="settings-field settings-field-wide">
               <span>llama-server 程序</span>
